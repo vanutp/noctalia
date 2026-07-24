@@ -14,11 +14,15 @@ public:
   ~AnimationManager();
 
   AnimationManager(const AnimationManager&) = delete;
-  AnimationManager& operator=(const AnimationManager&) = delete;
   AnimationManager(AnimationManager&&) = delete;
+  AnimationManager& operator=(const AnimationManager&) = delete;
   AnimationManager& operator=(AnimationManager&&) = delete;
 
   Id animate(
+      float from, float to, float durationMs, Easing easing, std::function<void(float)> setter,
+      std::function<void()> onComplete = {}, const void* owner = nullptr
+  );
+  Id animateNull(
       float from, float to, float durationMs, Easing easing, std::function<void(float)> setter,
       std::function<void()> onComplete = {}, const void* owner = nullptr
   );
@@ -51,6 +55,7 @@ private:
 
   Id animateInternal(
       float from, float to, float durationMs, Easing easing, std::function<void(float)> setter,
-      std::function<void()> onComplete, const void* owner, bool scaleDuration, bool respectMotionEnabled
+      std::function<void()> onComplete, const void* owner, bool scaleDuration, bool respectMotionEnabled,
+      bool dontAnimate
   );
 };
