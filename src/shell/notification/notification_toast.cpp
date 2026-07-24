@@ -782,7 +782,7 @@ void NotificationToast::onNotificationEvent(const Notification& n, NotificationE
             if (entryRevealInFlight && preservedReveal < 1.0F && hasPlacement(m_entries[i])) {
               const float targetY = cardSurfaceY(*inst, i);
               Instance* instPtr = inst.get();
-              cs.entryAnimId = inst->animations.animate(
+              cs.entryAnimId = inst->animations.animateNull(
                   preservedReveal, 1.0F, Style::animNormal, Easing::EaseOutCubic,
                   [this, viewport = cs.cardNode, content = cs.cardContent, foreground = cs.cardForeground, targetY,
                    cardHeight = cs.clipHeight, scale = notificationUiScale(m_config),
@@ -839,7 +839,7 @@ void NotificationToast::onNotificationEvent(const Notification& n, NotificationE
           // Flash
           if (cs.cardForeground != nullptr) {
             cs.cardForeground->setOpacity(0.7F);
-            inst->animations.animate(
+            inst->animations.animateNull(
                 0.7F, 1.0F, Style::animFast, Easing::EaseOutCubic,
                 [content = cs.cardForeground](float v) { content->setOpacity(v); }, {}, cs.cardForeground
             );
@@ -1070,7 +1070,7 @@ void NotificationToast::addCardToInstance(Instance& inst, std::size_t entryIndex
   inst.sceneRoot->addChild(std::unique_ptr<Node>(card));
 
   // Entry animation
-  cs.entryAnimId = inst.animations.animate(
+  cs.entryAnimId = inst.animations.animateNull(
       0.0F, 1.0F, Style::animNormal, Easing::EaseOutCubic,
       [this, viewport = cs.cardNode, content = cs.cardContent, foreground = cs.cardForeground, targetY,
        cardHeight = cs.clipHeight, scale = notificationUiScale(m_config), width = notificationWidth(m_config),
@@ -1276,7 +1276,7 @@ void NotificationToast::dismissCardFromInstance(Instance& inst, std::size_t entr
   const float targetY = card->y();
   const uint32_t removingId = (entryIndex < m_entries.size()) ? m_entries[entryIndex].notificationId : 0;
 
-  cs.exitAnimId = inst.animations.animate(
+  cs.exitAnimId = inst.animations.animateNull(
       startReveal, 0.0F, Style::animNormal, Easing::EaseInOutQuad,
       [this, card, content, foreground, targetY, cardHeight, scale = notificationUiScale(m_config),
        width = notificationWidth(m_config), edgePad = horizontalInnerPad(notificationUiScale(m_config))](float v) {
@@ -1956,7 +1956,7 @@ void NotificationToast::collapseStack() {
           Node* viewport = cs.cardNode;
           Node* content = cs.cardContent;
           Node* foreground = cs.cardForeground;
-          cs.entryAnimId = inst->animations.animate(
+          cs.entryAnimId = inst->animations.animateNull(
               currentReveal, 1.0F, Style::animNormal, Easing::EaseOutCubic,
               [this, viewport, content, foreground, newSurfY, cardHeight, scale, width = notificationWidth(m_config),
                edgePad = horizontalInnerPad(scale)](float v) {
@@ -1978,7 +1978,7 @@ void NotificationToast::collapseStack() {
         const float oldSurfY = cs.cardNode->y();
         Node* cardNode = cs.cardNode;
 
-        cs.slideAnimId = inst->animations.animate(
+        cs.slideAnimId = inst->animations.animateNull(
             oldSurfY, newSurfY, Style::animNormal, Easing::EaseInOutQuad,
             [cardNode, px](float v) { cardNode->setPosition(px, v); },
             [this, instPtr, entryId]() {

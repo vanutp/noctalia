@@ -22,6 +22,10 @@ public:
       float from, float to, float durationMs, Easing easing, std::function<void(float)> setter,
       std::function<void()> onComplete = {}, const void* owner = nullptr
   );
+  Id animateNull(
+      float from, float to, float durationMs, Easing easing, std::function<void(float)> setter,
+      std::function<void()> onComplete = {}, const void* owner = nullptr
+  );
   // Real elapsed-time driver: ignores global motion enable/speed. Use for timeouts,
   // and for visual effects with a deliberate fixed duration that must stay independent
   // of the global animation settings (e.g. the wallpaper crossfade).
@@ -51,6 +55,7 @@ private:
 
   Id animateInternal(
       float from, float to, float durationMs, Easing easing, std::function<void(float)> setter,
-      std::function<void()> onComplete, const void* owner, bool scaleDuration, bool respectMotionEnabled
+      std::function<void()> onComplete, const void* owner, bool scaleDuration, bool respectMotionEnabled,
+      bool dontAnimate
   );
 };

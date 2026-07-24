@@ -16,22 +16,35 @@ AnimationManager::Id AnimationManager::animate(
     float from, float to, float durationMs, Easing easing, std::function<void(float)> setter,
     std::function<void()> onComplete, const void* owner
 ) {
-  return animateInternal(from, to, durationMs, easing, std::move(setter), std::move(onComplete), owner, true, true);
+  return animateInternal(
+      from, to, durationMs, easing, std::move(setter), std::move(onComplete), owner, true, true, false
+  );
+}
+
+AnimationManager::Id AnimationManager::animateNull(
+    float from, float to, float durationMs, Easing easing, std::function<void(float)> setter,
+    std::function<void()> onComplete, const void* owner
+) {
+  return animateInternal(
+      from, to, durationMs, easing, std::move(setter), std::move(onComplete), owner, true, true, true
+  );
 }
 
 AnimationManager::Id AnimationManager::animateTimer(
     float from, float to, float durationMs, Easing easing, std::function<void(float)> setter,
     std::function<void()> onComplete, const void* owner
 ) {
-  return animateInternal(from, to, durationMs, easing, std::move(setter), std::move(onComplete), owner, false, false);
+  return animateInternal(
+      from, to, durationMs, easing, std::move(setter), std::move(onComplete), owner, false, false, false
+  );
 }
 
 AnimationManager::Id AnimationManager::animateInternal(
     float from, float to, float durationMs, Easing easing, std::function<void(float)> setter,
-    std::function<void()> onComplete, const void* owner, bool scaleDuration, bool respectMotionEnabled
+    std::function<void()> onComplete, const void* owner, bool scaleDuration, bool respectMotionEnabled, bool dontAnimate
 ) {
   const auto& motion = MotionService::instance();
-  const bool reduceMotion = respectMotionEnabled && !motion.enabled();
+  const bool reduceMotion = dontAnimate || (respectMotionEnabled && !motion.enabled());
   if (reduceMotion) {
     if (setter) {
       setter(to);
