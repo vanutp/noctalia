@@ -847,6 +847,7 @@ BluetoothStateChangeOrigin BluetoothService::consumePoweredChangeOrigin(bool pow
 }
 
 void BluetoothService::scheduleAutoReconnect() {
+  return;
   if (!m_state.powered || m_state.rfkillHardBlocked) {
     return;
   }
