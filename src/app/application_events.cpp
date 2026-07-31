@@ -4,12 +4,15 @@
 #include "core/log.h"
 #include "dbus/bluetooth/bluetooth_service.h"
 #include "dbus/network/inetwork_service.h"
+#include "i18n/i18n.h"
 #include "pipewire/sound_player.h"
 #include "render/backend/render_backend.h"
 
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <string>
+#include <unordered_map>
 
 namespace {
   constexpr Logger kLog("app");
@@ -175,6 +178,49 @@ void Application::onBluetoothStateChangedForEvents(const BluetoothState& state, 
     }
   }
   m_prevBluetoothPoweredForEvents = state.powered;
+}
+
+void Application::onBluetoothDevicesChangedForEvents(const std::vector<BluetoothDeviceInfo>& devices) {
+  std::unordered_map<std::string, std::string> connected;
+  for (const auto& device : devices) {
+    if (device.connected) {
+      connected.emplace(device.path, device.alias);
+    }
+  }
+
+  // The first callback is the initial BlueZ enumeration: seed silently so devices
+  // already connected at startup do not notify.
+  if (!m_prevBluetoothConnectedForEvents.has_value()) {
+    m_prevBluetoothConnectedForEvents = std::move(connected);
+    return;
+  }
+  const auto& prev = *m_prevBluetoothConnectedForEvents;
+
+  auto notify = [this, &devices](const std::string& path, const std::string& alias, bool isConnect) {
+    const auto it = std::ranges::find(devices, path, &BluetoothDeviceInfo::path);
+    const auto kind = it != devices.end() ? it->kind : BluetoothDeviceKind::Unknown;
+    const std::string label = alias.empty() ? i18n::tr("notifications.internal.bluetooth-device") : alias;
+    m_notificationManager.addInternal(
+        i18n::tr("notifications.internal.bluetooth"),
+        i18n::tr(
+            isConnect ? "notifications.internal.bluetooth-connected" : "notifications.internal.bluetooth-disconnected"
+        ),
+        label, Urgency::Low, kDefaultNotificationTimeout, std::string("noctalia-glyph:") + bluetoothDeviceGlyph(kind)
+    );
+  };
+
+  for (const auto& [path, alias] : connected) {
+    if (!prev.contains(path)) {
+      notify(path, alias, true);
+    }
+  }
+  for (const auto& [path, alias] : prev) {
+    if (!connected.contains(path)) {
+      notify(path, alias, false);
+    }
+  }
+
+  m_prevBluetoothConnectedForEvents = std::move(connected);
 }
 
 void Application::onPowerProfileChangedForEvents(const PowerProfilesState& state, PowerProfilesChangeOrigin origin) {

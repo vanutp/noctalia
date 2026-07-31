@@ -99,6 +99,8 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace sdbus {
@@ -143,6 +145,7 @@ class UPowerService;
 enum class BluetoothStateChangeOrigin : std::uint8_t;
 enum class NetworkChangeOrigin : std::uint8_t;
 enum class PowerProfilesChangeOrigin : std::uint8_t;
+struct BluetoothDeviceInfo;
 struct BluetoothState;
 struct NetworkState;
 struct PowerProfilesState;
@@ -228,6 +231,7 @@ private:
   void onUpowerStateChangedForHooks();
   void onNetworkStateChangedForEvents(const NetworkState& state, NetworkChangeOrigin origin);
   void onBluetoothStateChangedForEvents(const BluetoothState& state, BluetoothStateChangeOrigin origin);
+  void onBluetoothDevicesChangedForEvents(const std::vector<BluetoothDeviceInfo>& devices);
   void onPowerProfileChangedForEvents(const PowerProfilesState& state, PowerProfilesChangeOrigin origin);
   [[nodiscard]] std::vector<PollSource*> currentPollSources();
   [[nodiscard]] std::vector<PollSource*> buildPollSources();
@@ -302,6 +306,8 @@ private:
   std::optional<bool> m_prevBatteryPluggedForEvents;
   std::optional<bool> m_prevWirelessEnabledForEvents;
   std::optional<bool> m_prevBluetoothPoweredForEvents;
+  // device path -> alias, for the devices connected as of the last notification pass
+  std::optional<std::unordered_map<std::string, std::string>> m_prevBluetoothConnectedForEvents;
   std::optional<std::string> m_prevPowerProfileActiveForEvents;
   std::unique_ptr<BrightnessService> m_brightnessService;
   std::unique_ptr<KeyboardBacklightService> m_keyboardBacklightService;

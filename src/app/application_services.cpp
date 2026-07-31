@@ -1358,9 +1358,12 @@ void Application::initSystemBusServices() {
             refreshBluetoothUi();
           }
       );
-      m_bluetoothService->setDevicesCallback([refreshBluetoothUi](const std::vector<BluetoothDeviceInfo>& /*devices*/) {
-        refreshBluetoothUi();
-      });
+      m_bluetoothService->setDevicesCallback(
+          [this, refreshBluetoothUi](const std::vector<BluetoothDeviceInfo>& devices) {
+            onBluetoothDevicesChangedForEvents(devices);
+            refreshBluetoothUi();
+          }
+      );
       if (m_bluetoothService->hasStateSnapshot()) {
         m_prevBluetoothPoweredForEvents = m_bluetoothService->state().powered;
       }

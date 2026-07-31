@@ -34,6 +34,9 @@ enum class BluetoothDeviceKind : std::uint8_t {
   Tv,
 };
 
+/// Glyph registry name (without the "noctalia-glyph:" prefix) for a device kind.
+const char* bluetoothDeviceGlyph(BluetoothDeviceKind kind);
+
 struct BluetoothDeviceInfo {
   std::string path;
   std::string address;
