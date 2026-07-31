@@ -558,6 +558,10 @@ namespace {
     return plan;
   }
 
+  std::string cacheKey(const std::string& iconName, int targetSize) {
+    return iconName + '\x1F' + std::to_string(std::max(0, targetSize));
+  }
+
   // Requires state.mutex to be held.
   void ensureThemeStateLocked(IconThemeState& state) {
     if (!state.initialized) {
@@ -668,7 +672,7 @@ const std::string& IconResolver::resolve(const std::string& iconName, int target
     return m_empty;
   }
   ensureFresh();
-  const std::string key = iconName + '\x1F' + std::to_string(std::max(0, targetSize));
+  const std::string key = cacheKey(iconName, targetSize);
   auto it = m_cache.find(key);
   if (it != m_cache.end()) {
     if (iconName.front() != '/' || pathExists(it->second)) {
@@ -784,6 +788,35 @@ std::string IconResolver::resolveStatusVector(const std::string& iconName, int t
 void IconResolver::invalidateMissingCache() {
   m_missingCache.clear();
   m_symbolicPreferredCache.clear();
+}
+
+IconWarmBatch IconResolver::warmBatch(const std::vector<std::string>& names, int targetSize) {
+  IconResolver resolver;
+  IconWarmBatch batch{.generation = resolver.m_generation, .targetSize = targetSize, .entries = {}};
+  batch.entries.reserve(names.size());
+  std::unordered_set<std::string> seen;
+  for (const auto& name : names) {
+    if (name.empty() || !seen.insert(name).second) {
+      continue;
+    }
+    batch.entries.emplace_back(name, resolver.findIcon(name, targetSize));
+  }
+  return batch;
+}
+
+void IconResolver::applyWarmBatch(const IconWarmBatch& batch) {
+  ensureFresh();
+  if (batch.generation != m_generation) {
+    return;
+  }
+  for (const auto& [name, path] : batch.entries) {
+    const std::string key = cacheKey(name, batch.targetSize);
+    if (!path.empty()) {
+      m_cache.emplace(key, path);
+    } else if (m_cacheMissing && !name.empty() && name.front() != '/') {
+      m_missingCache.emplace(key);
+    }
+  }
 }
 
 std::string IconResolver::findIcon(const std::string& name, int targetSize) const {
