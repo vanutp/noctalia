@@ -46,6 +46,10 @@ public:
   void onClose() override;
   void onIconThemeChanged() override;
 
+  // Resolves the icon paths of every desktop entry on a worker thread so the
+  // first open does not pay for hundreds of theme lookups.
+  void warmIconCache();
+
   void clearUsage();
   void syncUsageTrackingState();
 
@@ -101,6 +105,7 @@ private:
   void applyPinnedApplicationOrder();
   void reorderPinnedApplication(std::string_view sourcePath, std::string_view targetPath);
   [[nodiscard]] bool shouldTrackUsage() const;
+  void startIconWarmup();
 
   std::vector<std::unique_ptr<LauncherProvider>> m_providers;
   std::vector<LauncherResult> m_results;
@@ -143,4 +148,6 @@ private:
   std::unique_ptr<ContextMenuPopup> m_actionsMenu;
   Signal<>::ScopedConnection m_appIconColorizeConn;
   std::function<void()> m_onCopiedActivation;
+  // Guards the icon warm-up thread's callback against panel destruction.
+  std::shared_ptr<bool> m_lifetime = std::make_shared<bool>(true);
 };

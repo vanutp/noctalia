@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 // One concrete icon-theme directory to search, with the metadata needed for
@@ -13,6 +14,15 @@ struct IconSearchDir {
   int size = 0;
   bool scalable = false;
   std::string theme;
+};
+
+// Icon names resolved ahead of time (off the main thread) for a single target
+// size, ready to be folded into a resolver's cache. An empty path means the
+// name did not resolve.
+struct IconWarmBatch {
+  std::uint64_t generation = 0;
+  int targetSize = 0;
+  std::vector<std::pair<std::string, std::string>> entries;
 };
 
 class IconResolver {
@@ -28,6 +38,13 @@ public:
   // legacy "prefer scalable, then largest" behavior for callers that have no size.
   const std::string& resolve(const std::string& iconName, int targetSize = 0);
   void invalidateMissingCache();
+
+  // Resolves `names` without touching any existing resolver, so it is safe to
+  // call from a worker thread; the result is merged in with applyWarmBatch().
+  static IconWarmBatch warmBatch(const std::vector<std::string>& names, int targetSize);
+  // Merges pre-resolved paths into this resolver's cache. A batch built against
+  // an older icon theme is discarded.
+  void applyWarmBatch(const IconWarmBatch& batch);
 
   static bool checkThemeChanged();
   static std::uint64_t themeGeneration();

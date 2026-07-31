@@ -14,6 +14,7 @@
 #include "render/scene/node.h"
 #include "shell/dock/pinned_apps.h"
 #include "shell/panel/panel_manager.h"
+#include "shell/panel/panel_surface_style.h"
 #include "system/desktop_entry.h"
 #include "ui/app_icon_colorization.h"
 #include "ui/builders.h"
@@ -31,6 +32,7 @@
 #include <functional>
 #include <memory>
 #include <string_view>
+#include <thread>
 #include <tuple>
 
 namespace {
@@ -1452,6 +1454,57 @@ void LauncherPanel::onClose() {
 }
 
 void LauncherPanel::onIconThemeChanged() { reapplyCurrentQuery(); }
+
+void LauncherPanel::warmIconCache() {
+  // Deferred so the rest of the startup path finishes first; this still runs
+  // before the first frame, so it must not do real work on the main thread.
+  DeferredCall::callLater([this, guard = std::weak_ptr(m_lifetime)]() {
+    if (guard.expired()) {
+      return;
+    }
+    startIconWarmup();
+  });
+}
+
+void LauncherPanel::startIconWarmup() {
+  // The panel is not open yet, so its content scale is still the default —
+  // take the scale it will be given on open.
+  const float scale = shell::panel_surface::contentScale(m_config);
+  const int targetSize =
+      static_cast<int>(std::round(launcherIconSize(launcherListStyleFrom(m_config, scale, panelCardOpacity()))));
+  // Freshness is the main thread's job; the worker only reads the snapshot.
+  const std::uint64_t entriesVersion = desktopEntriesVersion();
+  std::thread([this, guard = std::weak_ptr(m_lifetime), targetSize, entriesVersion]() mutable {
+    const auto entries = desktopEntriesSnapshot();
+    std::vector<std::string> names;
+    names.reserve((entries != nullptr ? entries->size() : 0) + 1);
+    names.emplace_back("application-x-executable");
+    if (entries != nullptr) {
+      for (const auto& entry : *entries) {
+        if (!entry.noDisplay && !entry.hidden && !entry.icon.empty()) {
+          names.push_back(entry.icon);
+        }
+      }
+    }
+
+    auto batch = IconResolver::warmBatch(names, targetSize);
+    DeferredCall::callLater([this, guard = std::move(guard), batch = std::move(batch), entriesVersion]() mutable {
+      if (guard.expired()) {
+        return;
+      }
+      if (desktopEntriesVersion() == entriesVersion) {
+        // The missing entries we are about to record describe exactly this
+        // version, so don't let the first query drop them again.
+        m_desktopEntriesVersion = entriesVersion;
+      } else {
+        // Entries changed while we were resolving: an app installed in that window
+        // may now own an icon we just recorded as missing, so keep only the hits.
+        std::erase_if(batch.entries, [](const auto& entry) { return entry.second.empty(); });
+      }
+      m_iconResolver.applyWarmBatch(batch);
+    });
+  }).detach();
+}
 
 void LauncherPanel::clearUsage() {
   m_usageTracker.clear();

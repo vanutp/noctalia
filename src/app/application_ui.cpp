@@ -654,6 +654,7 @@ void Application::initPanelManagerAndPanels() {
     });
     m_launcherPanel = launcherPanel.get();
     m_panelManager.registerPanel("launcher", std::move(launcherPanel));
+    m_launcherPanel->warmIconCache();
   }
   m_configService.addReloadCallback(
       [this]() {
