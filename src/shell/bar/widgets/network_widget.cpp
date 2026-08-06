@@ -8,6 +8,7 @@
 #include "render/scene/node.h"
 #include "system/format_units.h"
 #include "system/system_monitor_service.h"
+#include "system/tailscale_service.h"
 #include "ui/builders.h"
 #include "ui/palette.h"
 #include "ui/style.h"
@@ -68,13 +69,34 @@ namespace {
 } // namespace
 
 NetworkWidget::NetworkWidget(
-    INetworkService* network, ExternalIpService* externalIp, SystemMonitorService* monitor, ModemManagerService* modem,
-    wl_output* /*output*/, Options options
+    INetworkService* network, ExternalIpService* externalIp, TailscaleService* tailscale, SystemMonitorService* monitor,
+    ModemManagerService* modem, wl_output* /*output*/, Options options
 )
-    : m_network(network), m_externalIp(externalIp), m_monitor(monitor), m_modem(modem), m_showLabel(options.showLabel),
-      m_showVpnLabel(options.showVpnLabel), m_vpnStatusMode(options.vpnStatusMode),
+    : m_network(network), m_externalIp(externalIp), m_tailscale(tailscale), m_monitor(monitor), m_modem(modem),
+      m_showLabel(options.showLabel), m_showVpnLabel(options.showVpnLabel), m_vpnStatusMode(options.vpnStatusMode),
       m_glyphPosition(options.glyphPosition) {
   setPeek(options.peek && options.showLabel, options.peekDelayMs);
+}
+
+// The label shows whatever tunnel is up: a NetworkManager VPN first, otherwise
+// the tailscale exit node.
+std::string NetworkWidget::activeVpnName() const {
+  if (m_network != nullptr) {
+    if (std::string name = firstActiveVpnName(m_network->vpnConnections()); !name.empty()) {
+      return name;
+    }
+  }
+  return activeExitNodeName();
+}
+
+std::string NetworkWidget::activeExitNodeName() const {
+  return m_tailscale != nullptr ? m_tailscale->activeExitNodeName() : std::string{};
+}
+
+// A tailscale exit node routes everything through a remote peer, so it counts as
+// an active VPN for the indicator just like a NetworkManager tunnel does.
+bool NetworkWidget::vpnActive(const NetworkState& s) const {
+  return s.vpnActive || (m_tailscale != nullptr && m_tailscale->exitNodeActive());
 }
 
 void NetworkWidget::create() {
@@ -251,8 +273,10 @@ void NetworkWidget::syncState(Renderer& renderer) {
   const bool cellularEnabled = cellularPresent && modem->enabled();
   const std::uint8_t cellularSignal = cellularPresent ? modem->signalQuality : 0;
   const std::string cellularOperator = cellularPresent ? modem->operatorName : std::string{};
+  std::string exitNode = activeExitNodeName();
   if (m_haveLastState
       && s == m_lastState
+      && exitNode == m_lastExitNode
       && m_isVertical == m_lastVertical
       && cellularPresent == m_lastCellularPresent
       && cellularEnabled == m_lastCellularEnabled
@@ -261,19 +285,21 @@ void NetworkWidget::syncState(Renderer& renderer) {
     return;
   }
   m_lastState = s;
+  m_lastExitNode = std::move(exitNode);
   m_haveLastState = true;
   m_lastVertical = m_isVertical;
   m_lastCellularPresent = cellularPresent;
   m_lastCellularEnabled = cellularEnabled;
   m_lastCellularSignal = cellularSignal;
   m_lastCellularOperator = cellularOperator;
+  const bool vpnOn = vpnActive(s);
 
   const bool cellularPrimary = s.kind == NetworkConnectivity::Cellular;
   const bool showSpinner = s.kind == NetworkConnectivity::Wired && s.resolving;
 
   // VPN glyph (both mode): show shield icon next to network icon
   if (m_vpnGlyph != nullptr) {
-    const bool showVpn = m_vpnStatusMode == VpnStatusMode::Both && s.vpnActive;
+    const bool showVpn = m_vpnStatusMode == VpnStatusMode::Both && vpnOn;
     m_vpnGlyph->setVisible(showVpn);
     if (showVpn) {
       m_vpnGlyph->setGlyph(network_display::vpnGlyph());
@@ -286,7 +312,7 @@ void NetworkWidget::syncState(Renderer& renderer) {
   // Main network glyph: replace mode uses the VPN icon when active; a primary
   // cellular connection shows live ModemManager signal bars.
   m_glyph->setVisible(!showSpinner);
-  if (m_vpnStatusMode == VpnStatusMode::Replace && s.vpnActive) {
+  if (m_vpnStatusMode == VpnStatusMode::Replace && vpnOn) {
     m_glyph->setGlyph(network_display::vpnGlyph());
   } else if (cellularPrimary && modem != nullptr) {
     m_glyph->setGlyph(
@@ -316,8 +342,8 @@ void NetworkWidget::syncState(Renderer& renderer) {
     if (showLabel) {
       std::string text = labelForState(s, modem);
       // In replace mode, vpn_label overrides the network label.
-      if (m_vpnStatusMode == VpnStatusMode::Replace && m_showVpnLabel && s.vpnActive) {
-        if (std::string vpnName = firstActiveVpnName(m_network->vpnConnections()); !vpnName.empty()) {
+      if (m_vpnStatusMode == VpnStatusMode::Replace && m_showVpnLabel && vpnOn) {
+        if (std::string vpnName = activeVpnName(); !vpnName.empty()) {
           text = std::move(vpnName);
         }
       }
@@ -333,10 +359,10 @@ void NetworkWidget::syncState(Renderer& renderer) {
 
   // VPN label (both mode): shows VPN name next to VPN icon.
   if (m_vpnLabel != nullptr) {
-    const bool showVpnLabel = m_vpnStatusMode == VpnStatusMode::Both && m_showVpnLabel && m_showLabel && s.vpnActive;
+    const bool showVpnLabel = m_vpnStatusMode == VpnStatusMode::Both && m_showVpnLabel && m_showLabel && vpnOn;
     m_vpnLabel->setVisible(showVpnLabel);
     if (showVpnLabel) {
-      std::string vpnText = firstActiveVpnName(m_network->vpnConnections());
+      std::string vpnText = activeVpnName();
       if (m_isVertical && vpnText.size() > 3) {
         vpnText = vpnText.substr(0, 3);
       }
@@ -430,17 +456,23 @@ std::vector<TooltipRow> NetworkWidget::buildTooltipRows() const {
       );
     }
 
-    if (s.vpnActive) {
+    if (vpnActive(s)) {
       std::string vpnLabel;
-      for (const auto& vpn : m_network->vpnConnections()) {
-        if (!vpn.active || vpn.name.empty()) {
-          continue;
+      const auto append = [&vpnLabel](const std::string& name) {
+        if (name.empty()) {
+          return;
         }
         if (!vpnLabel.empty()) {
           vpnLabel += ", ";
         }
-        vpnLabel += vpn.name;
+        vpnLabel += name;
+      };
+      for (const auto& vpn : m_network->vpnConnections()) {
+        if (vpn.active) {
+          append(vpn.name);
+        }
       }
+      append(activeExitNodeName());
       rows.push_back(
           {i18n::tr("bar.widgets.network.vpn"), vpnLabel.empty() ? i18n::tr("bar.widgets.network.active") : vpnLabel}
       );
@@ -466,7 +498,7 @@ std::vector<TooltipRow> NetworkWidget::buildTooltipRows() const {
   if (secondaryModem != nullptr) {
     appendCellularRows(*secondaryModem);
   }
-  if (s.vpnActive) {
+  if (vpnActive(s)) {
     rows.push_back({i18n::tr("bar.widgets.network.vpn"), i18n::tr("bar.widgets.network.active")});
   }
   return rows;

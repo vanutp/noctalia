@@ -1442,6 +1442,19 @@ void Application::initSystemBusServices() {
     }
     m_configService.addReloadCallback([this] { m_externalIpService.onConfigReload(); });
 
+    m_tailscaleService.setChangeCallback([this, shouldRefreshControlCenter]() {
+      m_bar.refresh();
+      if (shouldRefreshControlCenter()) {
+        m_panelManager.refresh();
+      }
+    });
+    m_tailscaleService.setPrivilegedRunCallback([this]() {
+      if (m_configService.config().shell.polkitAgent && m_polkitAgent != nullptr) {
+        m_polkitAgent->markNextRequestInternal();
+      }
+    });
+    m_tailscaleService.start();
+
     try {
       m_networkSecretAgent = std::make_unique<NetworkSecretAgent>(*m_systemBus);
     } catch (const std::exception& e) {
