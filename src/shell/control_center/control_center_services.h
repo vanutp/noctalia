@@ -27,6 +27,7 @@ class PipeWireSpectrum;
 class PowerProfilesService;
 class ScreenTimeService;
 class SystemMonitorService;
+class TailscaleService;
 class ThumbnailService;
 class UPowerService;
 class Wallpaper;
@@ -55,6 +56,7 @@ struct ControlCenterServices {
   ModemManagerService* modem = nullptr;
   NetworkSecretAgent* networkSecrets = nullptr;
   ExternalIpService* externalIp = nullptr;
+  TailscaleService* tailscale = nullptr;
   BluetoothService* bluetooth = nullptr;
   BluetoothAgent* bluetoothAgent = nullptr;
   BrightnessService* brightness = nullptr;
