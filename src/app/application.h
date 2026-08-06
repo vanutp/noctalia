@@ -72,6 +72,7 @@
 #include "system/lock_keys_poll_source.h"
 #include "system/lock_keys_service.h"
 #include "system/screen_time_service.h"
+#include "system/tailscale_service.h"
 #include "system/telemetry_service.h"
 #include "system/weather_poll_source.h"
 #include "system/weather_service.h"
@@ -290,6 +291,7 @@ private:
   std::unique_ptr<INetworkService> m_networkService;
   std::unique_ptr<NetworkSecretAgent> m_networkSecretAgent;
   ExternalIpService m_externalIpService{&m_httpClient, &m_configService};
+  TailscaleService m_tailscaleService;
   std::unique_ptr<IwdSecretAgent> m_iwdSecretAgent;
   // Declared before m_bluetoothService so it outlives the raw pointer in that service.
   std::unique_ptr<UPowerService> m_upowerService;

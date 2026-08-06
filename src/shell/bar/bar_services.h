@@ -21,6 +21,7 @@ class PowerProfilesService;
 class RenderContext;
 class ScreenshotService;
 class SystemMonitorService;
+class TailscaleService;
 class TrayService;
 class UPowerService;
 class WeatherService;
@@ -46,6 +47,7 @@ struct BarServices {
   INetworkService* network = nullptr;
   ModemManagerService* modem = nullptr;
   ExternalIpService* externalIp = nullptr;
+  TailscaleService* tailscale = nullptr;
   IdleInhibitor* idleInhibitor = nullptr;
   MprisService* mpris = nullptr;
   PipeWireSpectrum* audioSpectrum = nullptr;

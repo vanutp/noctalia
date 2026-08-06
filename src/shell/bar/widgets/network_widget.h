@@ -13,6 +13,7 @@ class Label;
 class ModemManagerService;
 class Spinner;
 class SystemMonitorService;
+class TailscaleService;
 struct wl_output;
 
 enum class VpnStatusMode : std::uint8_t {
@@ -30,8 +31,8 @@ public:
   };
 
   NetworkWidget(
-      INetworkService* network, ExternalIpService* externalIp, SystemMonitorService* monitor,
-      ModemManagerService* modem, wl_output* output, Options options
+      INetworkService* network, ExternalIpService* externalIp, TailscaleService* tailscale,
+      SystemMonitorService* monitor, ModemManagerService* modem, wl_output* output, Options options
   );
 
   void create() override;
@@ -41,9 +42,13 @@ private:
   void doUpdate(Renderer& renderer) override;
   void syncState(Renderer& renderer);
   [[nodiscard]] std::vector<TooltipRow> buildTooltipRows() const;
+  [[nodiscard]] std::string activeVpnName() const;
+  [[nodiscard]] std::string activeExitNodeName() const;
+  [[nodiscard]] bool vpnActive(const NetworkState& s) const;
 
   INetworkService* m_network = nullptr;
   ExternalIpService* m_externalIp = nullptr;
+  TailscaleService* m_tailscale = nullptr;
   SystemMonitorService* m_monitor = nullptr;
   ModemManagerService* m_modem = nullptr;
   bool m_showLabel = true;
@@ -55,6 +60,9 @@ private:
   Label* m_label = nullptr;
   Label* m_vpnLabel = nullptr;
   NetworkState m_lastState;
+  // Tailscale lives outside NetworkState, so its active exit node is part of the
+  // change check that gates a resync.
+  std::string m_lastExitNode;
   bool m_haveLastState = false;
   bool m_lastCellularPresent = false;
   bool m_lastCellularEnabled = false;

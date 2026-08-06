@@ -1,5 +1,6 @@
 #include "shell/control_center/tabs/network_tab.h"
 
+#include "core/files/resource_paths.h"
 #include "core/ui_phase.h"
 #include "dbus/modem/modem_manager_service.h"
 #include "dbus/network/external_ip_service.h"
@@ -9,6 +10,7 @@
 #include "render/core/renderer.h"
 #include "render/scene/input_area.h"
 #include "shell/panel/panel_manager.h"
+#include "system/tailscale_service.h"
 #include "ui/builders.h"
 #include "ui/palette.h"
 #include "ui/style.h"
@@ -16,7 +18,9 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -190,7 +194,7 @@ namespace {
 
   std::string percentText(std::uint8_t percent) { return std::to_string(static_cast<int>(percent)) + "%"; }
 
-  std::unique_ptr<Flex> makeWifiBucketHeaderRow(const std::string& title, float scale) {
+  std::unique_ptr<Flex> makeBucketHeaderRow(const std::string& title, float scale) {
     auto row = ui::row({
         .align = FlexAlign::Center,
     });
@@ -401,13 +405,22 @@ private:
 
 namespace {
 
+  // Shared by NetworkManager VPN profiles and tailscale exit nodes: a name, a
+  // check mark while active, and one button that connects or disconnects.
+  struct VpnRowSpec {
+    std::string name;
+    std::string iconAsset; // svg under assets/, empty for no leading icon
+    bool active = false;
+    bool enabled = true;
+    std::function<void()> onActivate;
+    std::function<void()> onDeactivate;
+  };
+
   class VpnConnectionRow : public Flex {
   public:
-    VpnConnectionRow(
-        float scale, VpnConnectionInfo vpn, std::function<void(const VpnConnectionInfo&)> onActivate,
-        std::function<void(const VpnConnectionInfo&)> onDeactivate
-    )
-        : m_vpn(std::move(vpn)), m_onActivate(std::move(onActivate)), m_onDeactivate(std::move(onDeactivate)) {
+    VpnConnectionRow(Renderer& renderer, float scale, VpnRowSpec spec)
+        : m_active(spec.active), m_enabled(spec.enabled), m_onActivate(std::move(spec.onActivate)),
+          m_onDeactivate(std::move(spec.onDeactivate)) {
       setDirection(FlexDirection::Horizontal);
       setAlign(FlexAlign::Center);
       setGap(Style::spaceSm * scale);
@@ -417,12 +430,22 @@ namespace {
       setFill(colorSpecFromRole(ColorRole::Surface));
       clearBorder();
 
+      if (!spec.iconAsset.empty()) {
+        const float iconSize = Style::baseGlyphSize * scale;
+        auto icon = ui::image({.width = iconSize, .height = iconSize});
+        icon->setForegroundTint(colorSpecFromRole(ColorRole::OnSurfaceVariant));
+        icon->setSourceFile(
+            renderer, paths::assetPath(spec.iconAsset).string(), static_cast<int>(std::round(iconSize)), true
+        );
+        addChild(std::move(icon));
+      }
+
       addChild(
           ui::label({
               .out = &m_title,
-              .text = m_vpn.name,
+              .text = spec.name,
               .fontSize = Style::fontSizeBody * scale,
-              .fontWeight = m_vpn.active ? FontWeight::Bold : FontWeight::Normal,
+              .fontWeight = m_active ? FontWeight::Bold : FontWeight::Normal,
               .color = colorSpecFromRole(ColorRole::OnSurface),
               .flexGrow = 1.0F,
           })
@@ -436,16 +459,17 @@ namespace {
               .variant = ButtonVariant::Ghost,
               .padding = Style::spaceXs * scale,
               .radius = Style::scaledRadiusSm(scale),
-              .opacity = m_vpn.active ? 1.0F : 0.0F,
+              .opacity = m_active ? 1.0F : 0.0F,
           })
       );
 
       addChild(
           ui::button({
               .out = &m_actionButton,
-              .glyph = m_vpn.active ? "plug-off" : "plug",
+              .glyph = m_active ? "plug-off" : "plug",
               .glyphSize = Style::baseGlyphSize * scale,
-              .variant = m_vpn.active ? ButtonVariant::Destructive : ButtonVariant::Default,
+              .enabled = m_enabled,
+              .variant = m_active ? ButtonVariant::Destructive : ButtonVariant::Default,
               .padding = Style::spaceXs * scale,
               .radius = Style::scaledRadiusSm(scale),
               .onClick = [this]() { triggerAction(); },
@@ -488,13 +512,16 @@ namespace {
 
   private:
     void triggerAction() {
-      if (m_vpn.active) {
+      if (!m_enabled) {
+        return;
+      }
+      if (m_active) {
         if (m_onDeactivate) {
-          m_onDeactivate(m_vpn);
+          m_onDeactivate();
         }
       } else {
         if (m_onActivate) {
-          m_onActivate(m_vpn);
+          m_onActivate();
         }
       }
     }
@@ -521,9 +548,10 @@ namespace {
       }
     }
 
-    VpnConnectionInfo m_vpn;
-    std::function<void(const VpnConnectionInfo&)> m_onActivate;
-    std::function<void(const VpnConnectionInfo&)> m_onDeactivate;
+    bool m_active = false;
+    bool m_enabled = true;
+    std::function<void()> m_onActivate;
+    std::function<void()> m_onDeactivate;
     Label* m_title = nullptr;
     Button* m_checkButton = nullptr;
     Button* m_actionButton = nullptr;
@@ -600,9 +628,11 @@ private:
 };
 
 NetworkTab::NetworkTab(
-    INetworkService* network, NetworkSecretAgent* secrets, ExternalIpService* externalIp, ModemManagerService* modem
+    INetworkService* network, NetworkSecretAgent* secrets, ExternalIpService* externalIp, ModemManagerService* modem,
+    TailscaleService* tailscale
 )
-    : m_network(network), m_secrets(secrets), m_externalIpService(externalIp), m_modem(modem) {
+    : m_network(network), m_secrets(secrets), m_externalIpService(externalIp), m_modem(modem),
+      m_tailscale(tailscale) {
   if (m_secrets != nullptr) {
     m_secrets->setRequestCallback([this](const NetworkSecretAgent::SecretRequest& request) {
       showPasswordPrompt(request);
@@ -875,8 +905,14 @@ void NetworkTab::setActive(bool active) {
     return;
   }
   m_active = active;
-  if (m_active && m_network != nullptr) {
+  if (!m_active) {
+    return;
+  }
+  if (m_network != nullptr) {
     m_network->requestScan();
+  }
+  if (m_tailscale != nullptr) {
+    m_tailscale->refresh();
   }
 }
 
@@ -1231,8 +1267,10 @@ void NetworkTab::handleWirelessEnabledCompletion(std::uint64_t generation, bool 
 // each carries, and how each activates. The signal strength is absent by design —
 // it refreshes in place through syncApRows(), so a scan update no longer tears the
 // list down. Access points arrive sorted, so a change in row order changes the key.
-std::string
-NetworkTab::structureKey(const std::vector<AccessPointInfo>& aps, const std::vector<VpnConnectionInfo>& vpns) const {
+std::string NetworkTab::structureKey(
+    const std::vector<AccessPointInfo>& aps, const std::vector<VpnConnectionInfo>& vpns,
+    const std::vector<TailscaleExitNode>& exitNodes
+) const {
   std::string key;
   for (const auto& ap : aps) {
     key += ap.ssid;
@@ -1255,6 +1293,20 @@ NetworkTab::structureKey(const std::vector<AccessPointInfo>& aps, const std::vec
     key += vpn.active ? '1' : '0';
     key.push_back('\n');
   }
+  key += "---\n";
+  for (const auto& node : exitNodes) {
+    key += node.id;
+    key.push_back(':');
+    key += node.name;
+    key.push_back(':');
+    key += node.active ? '1' : '0';
+    key.push_back(':');
+    key += node.online ? '1' : '0';
+    key.push_back('\n');
+  }
+  key += "ts-busy:";
+  key += (m_tailscale != nullptr && m_tailscale->busy()) ? '1' : '0';
+  key.push_back('\n');
   const bool wirelessEnabled = m_network != nullptr && m_network->state().wirelessEnabled;
   const bool scanning = m_network != nullptr && m_network->state().scanning;
   key += "avail:";
@@ -1293,8 +1345,11 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
   if (m_network != nullptr) {
     aps = sortedAccessPoints(m_network->accessPoints());
   }
-  const auto& vpns = m_network != nullptr ? m_network->vpnConnections() : std::vector<VpnConnectionInfo>{};
-  const std::string nextStructure = structureKey(aps, vpns);
+  static const std::vector<VpnConnectionInfo> kNoVpns;
+  static const std::vector<TailscaleExitNode> kNoExitNodes;
+  const auto& vpns = m_network != nullptr ? m_network->vpnConnections() : kNoVpns;
+  const auto& exitNodes = m_tailscale != nullptr ? m_tailscale->exitNodes() : kNoExitNodes;
+  const std::string nextStructure = structureKey(aps, vpns, exitNodes);
   if (listWidth == m_lastListWidth && nextStructure == m_lastStructureKey) {
     return;
   }
@@ -1376,7 +1431,7 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
             .align = FlexAlign::Stretch,
             .gap = Style::spaceXs * scale,
         });
-        group->addChild(makeWifiBucketHeaderRow(title, scale));
+        group->addChild(makeBucketHeaderRow(title, scale));
         addRows(*group, bucket);
         container->addChild(std::move(group));
       };
@@ -1398,18 +1453,12 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
     m_list->removeChild(m_list->children().front().get());
   }
 
-  if (!networkAvailable()) {
-    m_list->addChild(
-        ui::label({
-            .text = i18n::tr("control-center.network.unavailable-title"),
-            .fontSize = Style::fontSizeBody * scale,
-            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-        })
-    );
-  } else {
+  {
     const float opacity = panelCardOpacity();
 
-    if (!vpns.empty()) {
+    // Tailscale is independent of the Wi-Fi backend, so the card is built even
+    // when no network service is available.
+    if (!vpns.empty() || !exitNodes.empty()) {
       auto vpnCard = ui::column({
           .configure = [scale, opacity](Flex& card) { applySectionCardStyle(card, scale, opacity); },
       });
@@ -1436,30 +1485,61 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
       vpnCard->addChild(std::move(vpnHeader));
 
       if (m_vpnVisible) {
+        std::vector<VpnRowSpec> rows;
+        rows.reserve(vpns.size() + exitNodes.size());
         for (const auto& vpn : vpns) {
-          auto row = std::make_unique<VpnConnectionRow>(
-              scale, vpn,
-              [this](const VpnConnectionInfo& clicked) {
-                if (m_network != nullptr) {
-                  m_network->activateVpnConnection(clicked);
-                }
-                PanelManager::instance().refresh();
-              },
-              [this](const VpnConnectionInfo& clicked) {
-                if (m_network != nullptr) {
-                  m_network->deactivateVpnConnection(clicked);
-                }
-                PanelManager::instance().refresh();
-              }
-          );
-          vpnCard->addChild(std::move(row));
+          rows.push_back({
+              .name = vpn.name,
+              .active = vpn.active,
+              .onActivate =
+                  [this, vpn]() {
+                    if (m_network != nullptr) {
+                      m_network->activateVpnConnection(vpn);
+                    }
+                    PanelManager::instance().refresh();
+                  },
+              .onDeactivate =
+                  [this, vpn]() {
+                    if (m_network != nullptr) {
+                      m_network->deactivateVpnConnection(vpn);
+                    }
+                    PanelManager::instance().refresh();
+                  },
+          });
+        }
+        for (const auto& node : exitNodes) {
+          rows.push_back({
+              .name = node.name,
+              .iconAsset = node.online ? "tailscale.svg" : "tailscale-off.svg",
+              .active = node.active,
+              .enabled = !m_tailscale->busy(),
+              .onActivate =
+                  [this, node]() {
+                    if (m_tailscale != nullptr) {
+                      m_tailscale->connectExitNode(node);
+                    }
+                    PanelManager::instance().refresh();
+                  },
+              .onDeactivate =
+                  [this]() {
+                    if (m_tailscale != nullptr) {
+                      m_tailscale->disconnectExitNode();
+                    }
+                    PanelManager::instance().refresh();
+                  },
+          });
+        }
+
+        std::ranges::stable_partition(rows, [](const VpnRowSpec& row) { return row.active; });
+        for (auto& row : rows) {
+          vpnCard->addChild(std::make_unique<VpnConnectionRow>(renderer, scale, std::move(row)));
         }
       }
 
       m_list->addChild(std::move(vpnCard));
     }
 
-    if (m_modem != nullptr && !m_modem->modems().empty()) {
+    if (networkAvailable() && m_modem != nullptr && !m_modem->modems().empty()) {
       auto cellularCard = ui::column({
           .configure = [scale, opacity](Flex& card) { applySectionCardStyle(card, scale, opacity); },
       });
@@ -1485,7 +1565,15 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
       m_list->addChild(std::move(cellularCard));
     }
 
-    {
+    if (!networkAvailable()) {
+      m_list->addChild(
+          ui::label({
+              .text = i18n::tr("control-center.network.unavailable-title"),
+              .fontSize = Style::fontSizeBody * scale,
+              .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+          })
+      );
+    } else {
       auto wifiCard = ui::column({
           .configure = [scale, opacity](Flex& card) { applySectionCardStyle(card, scale, opacity); },
       });

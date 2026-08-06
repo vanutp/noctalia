@@ -897,6 +897,8 @@
       "screen-time-reset": "Screen Time",
       "screen-time-reset-success": "Usage history cleared.",
       "session-bus-unavailable": "Session bus unavailable",
+      "tailscale": "Tailscale",
+      "tailscale-exit-node-failed": "Could not change the Tailscale exit node. Check that tailscaled is running and that the authentication was accepted.",
       "wallpaper-palette-export": "Custom Palette",
       "wallpaper-palette-export-success": "Saved \"{name}\" and switched palette source to custom."
     }

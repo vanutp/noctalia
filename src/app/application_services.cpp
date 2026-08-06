@@ -1326,6 +1326,19 @@ void Application::initSystemBusServices() {
     }
     m_configService.addReloadCallback([this]() { m_externalIpService.onConfigReload(); });
 
+    m_tailscaleService.setChangeCallback([this, shouldRefreshControlCenter]() {
+      m_bar.refresh();
+      if (shouldRefreshControlCenter()) {
+        m_panelManager.refresh();
+      }
+    });
+    m_tailscaleService.setPrivilegedRunCallback([this]() {
+      if (m_configService.config().shell.polkitAgent && m_polkitAgent != nullptr) {
+        m_polkitAgent->markNextRequestInternal();
+      }
+    });
+    m_tailscaleService.start();
+
     try {
       m_networkSecretAgent = std::make_unique<NetworkSecretAgent>(*m_systemBus);
     } catch (const std::exception& e) {
@@ -1358,12 +1371,11 @@ void Application::initSystemBusServices() {
             refreshBluetoothUi();
           }
       );
-      m_bluetoothService->setDevicesCallback(
-          [this, refreshBluetoothUi](const std::vector<BluetoothDeviceInfo>& devices) {
-            onBluetoothDevicesChangedForEvents(devices);
-            refreshBluetoothUi();
-          }
-      );
+      m_bluetoothService->setDevicesCallback([this,
+                                              refreshBluetoothUi](const std::vector<BluetoothDeviceInfo>& devices) {
+        onBluetoothDevicesChangedForEvents(devices);
+        refreshBluetoothUi();
+      });
       if (m_bluetoothService->hasStateSnapshot()) {
         m_prevBluetoothPoweredForEvents = m_bluetoothService->state().powered;
       }

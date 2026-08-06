@@ -27,11 +27,14 @@ class Select;
 class Spinner;
 class Toggle;
 class INetworkService;
+class TailscaleService;
+struct TailscaleExitNode;
 
 class NetworkTab : public Tab {
 public:
   NetworkTab(
-      INetworkService* network, NetworkSecretAgent* secrets, ExternalIpService* externalIp, ModemManagerService* modem
+      INetworkService* network, NetworkSecretAgent* secrets, ExternalIpService* externalIp, ModemManagerService* modem,
+      TailscaleService* tailscale
   );
   ~NetworkTab() override;
 
@@ -75,13 +78,16 @@ private:
   void setCredentialError(const std::string& message);
   // Reason this access point cannot be joined with a password, empty when it can.
   [[nodiscard]] std::string enterpriseBlockReason(const AccessPointInfo& ap) const;
-  [[nodiscard]] std::string
-  structureKey(const std::vector<AccessPointInfo>& aps, const std::vector<VpnConnectionInfo>& vpns) const;
+  [[nodiscard]] std::string structureKey(
+      const std::vector<AccessPointInfo>& aps, const std::vector<VpnConnectionInfo>& vpns,
+      const std::vector<TailscaleExitNode>& exitNodes
+  ) const;
 
   INetworkService* m_network = nullptr;
   NetworkSecretAgent* m_secrets = nullptr;
   ExternalIpService* m_externalIpService = nullptr;
   ModemManagerService* m_modem = nullptr;
+  TailscaleService* m_tailscale = nullptr;
 
   Flex* m_rootLayout = nullptr;
   Flex* m_currentCard = nullptr;

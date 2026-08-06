@@ -21,6 +21,7 @@ class BrightnessService;
 class ClipboardService;
 class EasyEffectsService;
 class ExternalIpService;
+class TailscaleService;
 class RenderContext;
 class ScreenshotService;
 class INetworkService;
@@ -64,6 +65,7 @@ private:
   INetworkService* m_network;
   ModemManagerService* m_modem;
   ExternalIpService* m_externalIp;
+  TailscaleService* m_tailscale;
   IdleInhibitor* m_idleInhibitor;
   MprisService* m_mpris;
   PipeWireSpectrum* m_audioSpectrum;

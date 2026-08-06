@@ -35,6 +35,7 @@ class EasyEffectsService;
 class ExternalIpService;
 class ScreenshotService;
 class INetworkService;
+class TailscaleService;
 class NotificationManager;
 class PipeWireService;
 class PipeWireSpectrum;
@@ -180,6 +181,7 @@ private:
   INetworkService* m_network = nullptr;
   ModemManagerService* m_modem = nullptr;
   ExternalIpService* m_externalIp = nullptr;
+  TailscaleService* m_tailscale = nullptr;
   IdleInhibitor* m_idleInhibitor = nullptr;
   MprisService* m_mpris = nullptr;
   PipeWireSpectrum* m_audioSpectrum = nullptr;

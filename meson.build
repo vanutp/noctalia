@@ -836,6 +836,7 @@ _noctalia_sources = files(
   'src/system/freedesktop_key_file.cpp',
   'src/system/desktop_entry_launch.cpp',
   'src/system/terminal_launch.cpp',
+  'src/system/tailscale_service.cpp',
   'src/system/brightness_service.cpp',
   'src/system/keyboard_backlight_service.cpp',
   'src/system/lock_keys_service.cpp',
