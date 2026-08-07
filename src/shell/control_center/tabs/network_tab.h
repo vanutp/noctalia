@@ -15,6 +15,7 @@
 #include <vector>
 
 class AccessPointRow;
+class ConnectionRow;
 class Button;
 class CellularRow;
 class ExternalIpService;
@@ -47,11 +48,14 @@ private:
 
   // A backend exists and its daemon is on the bus.
   [[nodiscard]] bool networkAvailable() const noexcept;
-  void syncCurrentCard();
-  void beginPendingAction(bool wasConnected);
+  // Values that move without changing the list structure: the connected row's
+  // addresses, the Wi-Fi toggle, the scan spinner.
+  void syncLiveState(Renderer& renderer);
   void requestWirelessEnabled(bool enabled);
   void handleWirelessEnabledCompletion(std::uint64_t generation, bool success);
   void rebuildApList(Renderer& renderer);
+  [[nodiscard]] int activeLinkCount() const;
+  [[nodiscard]] bool isPrimaryDevice(const std::string& devicePath) const;
   // Pushes live signal values into the existing rows. Returns true if any changed.
   bool syncApRows();
   // Same for the cellular rows and the cellular toggle. Returns true if any changed.
@@ -75,7 +79,8 @@ private:
   void setCredentialError(const std::string& message);
   // Reason this access point cannot be joined with a password, empty when it can.
   [[nodiscard]] std::string enterpriseBlockReason(const AccessPointInfo& ap) const;
-  [[nodiscard]] std::string structureKey(const std::vector<AccessPointInfo>& aps) const;
+  [[nodiscard]] std::string
+  structureKey(const std::vector<AccessPointInfo>& aps, const std::vector<WiredConnectionInfo>& wired) const;
 
   INetworkService* m_network = nullptr;
   NetworkSecretAgent* m_secrets = nullptr;
@@ -83,9 +88,6 @@ private:
   ModemManagerService* m_modem = nullptr;
 
   Flex* m_rootLayout = nullptr;
-  Flex* m_currentCard = nullptr;
-  Label* m_currentTitle = nullptr;
-  Label* m_currentDetail = nullptr;
   Flex* m_passwordCard = nullptr;
   Label* m_passwordTitle = nullptr;
   Input* m_passwordInput = nullptr;
@@ -106,11 +108,13 @@ private:
 
   Button* m_rescanButton = nullptr;
   Toggle* m_wifiToggle = nullptr;
-  Flex* m_currentRow = nullptr;
-  Button* m_disconnectButton = nullptr;
   Spinner* m_scanSpinner = nullptr;
 
+  // Rows by identity, so the live address sync can reach every connected link
+  // rather than one remembered row: two NICs can be up at once, each with its own
+  // address. Cleared whenever the list is torn down.
   std::unordered_map<std::string, AccessPointRow*> m_apRows;
+  std::unordered_map<std::string, ConnectionRow*> m_wiredRows;
 
   Toggle* m_cellularToggle = nullptr;
   std::vector<CellularRow*> m_cellularRows;
@@ -123,12 +127,6 @@ private:
   std::string m_pendingSsid;
   std::optional<AccessPointInfo> m_pendingAccessPoint;
   bool m_active = false;
-
-  // Connect/disconnect stays disabled from click until the state flips (or a
-  // timeout), so a click on stale state cannot fire the inverse action.
-  bool m_actionPending = false;
-  bool m_actionPendingConnected = false;
-  std::chrono::steady_clock::time_point m_actionPendingSince;
 
   bool m_wifiTogglePending = false;
   bool m_wifiToggleTarget = false;
@@ -143,9 +141,7 @@ private:
   bool m_cellularToggleTarget = false;
   std::chrono::steady_clock::time_point m_cellularTogglePendingSince;
 
-  Timer m_actionPendingTimer;
   Timer m_cellularTogglePendingTimer;
 
-  static constexpr std::chrono::seconds kActionPendingTimeout = std::chrono::seconds(6);
   static constexpr std::chrono::seconds kCellularPendingTimeout = std::chrono::seconds(25);
 };

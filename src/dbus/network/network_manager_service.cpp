@@ -33,6 +33,7 @@ namespace {
   constexpr auto kNmVpnConnectionInterface = "org.freedesktop.NetworkManager.VPN.Connection";
   constexpr auto kNmAccessPointInterface = "org.freedesktop.NetworkManager.AccessPoint";
   constexpr auto k_nmIp4ConfigInterface = "org.freedesktop.NetworkManager.IP4Config";
+  constexpr auto k_nmIp6ConfigInterface = "org.freedesktop.NetworkManager.IP6Config";
   constexpr auto kPropertiesInterface = "org.freedesktop.DBus.Properties";
   const sdbus::ServiceName kDbusBusName{"org.freedesktop.DBus"};
   const sdbus::ObjectPath kDbusObjectPath{"/org/freedesktop/DBus"};
@@ -41,7 +42,19 @@ namespace {
   using ConnectionSettings = std::map<std::string, std::map<std::string, sdbus::Variant>>;
   using VariantMap = std::map<std::string, sdbus::Variant>;
   constexpr std::string_view kNmWiredConnectionType = "802-3-ethernet";
+  // Profiles that carry a wired link on a virtual device, matching the device
+  // types the state walk treats as wired.
+  constexpr std::array<std::string_view, 4> kNmVirtualWiredConnectionTypes{"bridge", "bond", "team", "vlan"};
   constexpr std::string_view kNmCellularConnectionType = "gsm";
+  constexpr std::string_view kNmWirelessConnectionType = "802-11-wireless";
+  // NM's sentinel for "choose the route metric automatically from the device
+  // type" (ethernet lands on 100, wifi on 600). Zero is a real metric, not this.
+  constexpr std::int64_t kNmRouteMetricAutomatic = -1;
+  // Lowest metric we hand out. Staying off 0 keeps IPv6 out of the kernel's
+  // "0 means unset" coercion, and leaves the strongest slot for anything else.
+  constexpr std::int64_t kMinPromotedRouteMetric = 1;
+  // Used when nothing has to be outranked.
+  constexpr std::int64_t kDefaultPromotedRouteMetric = 50;
   constexpr std::string_view kNmVpnConnectionType = "vpn";
   constexpr std::string_view kNmWireguardConnectionType = "wireguard";
 
@@ -68,7 +81,11 @@ namespace {
 
   // NMSettingsConnectionFlags / NMSettingsUpdate2Flags.
   constexpr std::uint32_t kNmSettingsConnectionFlagUnsaved = 0x01;
+  // Profiles NM made up to describe interfaces other software created (docker0,
+  // virbr0, tailscale0, lo). They are kept under /run, so they have a filename.
+  constexpr std::uint32_t kNmSettingsConnectionFlagExternal = 0x08;
   constexpr std::uint32_t k_nmSettingsUpdate2FlagToDisk = 0x01;
+  constexpr std::uint32_t k_nmSettingsUpdate2FlagInMemory = 0x02;
 
   std::string ipv4FromUint(std::uint32_t addrLe) {
     // NM stores IPv4 addresses as native-byte-order uint32 in network order bytes.
@@ -83,19 +100,138 @@ namespace {
     return std::string(buf);
   }
 
+  // First address of an IP4Config property bag. AddressData is the modern
+  // representation; Addresses is the legacy uint32 triple kept for older NM.
+  std::string ipv4FromIp4Config(const std::map<std::string, sdbus::Variant>& ip4Properties) {
+    if (auto it = ip4Properties.find("AddressData"); it != ip4Properties.end()) {
+      try {
+        const auto addressData = it->second.get<std::vector<std::map<std::string, sdbus::Variant>>>();
+        for (const auto& entry : addressData) {
+          auto addressIt = entry.find("address");
+          if (addressIt == entry.end()) {
+            continue;
+          }
+          try {
+            std::string address = addressIt->second.get<std::string>();
+            if (!address.empty()) {
+              return address;
+            }
+          } catch (const sdbus::Error&) {
+          }
+        }
+      } catch (const sdbus::Error&) {
+      }
+    }
+    if (auto it = ip4Properties.find("Addresses"); it != ip4Properties.end()) {
+      try {
+        const auto addresses = it->second.get<std::vector<std::vector<std::uint32_t>>>();
+        if (!addresses.empty() && !addresses.front().empty()) {
+          return ipv4FromUint(addresses.front().front());
+        }
+      } catch (const sdbus::Error&) {
+      }
+    }
+    return {};
+  }
+
+  // A link's default route in one address family. No metric and not unknown means
+  // the link has no default route there, so there is nothing to outrank.
+  struct FamilyRoute {
+    std::optional<std::int64_t> metric;
+    bool unknown = false;
+  };
+
+  // Default route an IP4Config or IP6Config actually installed. This is the
+  // applied value, which is what the kernel compares — a profile's configured
+  // metric says nothing until the profile has been re-applied.
+  FamilyRoute defaultRoute(const std::map<std::string, sdbus::Variant>& ipProperties) {
+    const auto it = ipProperties.find("RouteData");
+    if (it == ipProperties.end()) {
+      return {.unknown = true};
+    }
+    try {
+      const auto routes = it->second.get<std::vector<std::map<std::string, sdbus::Variant>>>();
+      for (const auto& route : routes) {
+        std::uint32_t prefix = 1;
+        if (auto prefixIt = route.find("prefix"); prefixIt != route.end()) {
+          try {
+            prefix = prefixIt->second.get<std::uint32_t>();
+          } catch (const sdbus::Error&) {
+            continue;
+          }
+        }
+        if (prefix != 0) {
+          continue; // not the default route
+        }
+        if (auto metricIt = route.find("metric"); metricIt != route.end()) {
+          try {
+            return {.metric = static_cast<std::int64_t>(metricIt->second.get<std::uint32_t>())};
+          } catch (const sdbus::Error&) {
+          }
+        }
+        return {.unknown = true};
+      }
+    } catch (const sdbus::Error&) {
+      return {.unknown = true};
+    }
+    return {};
+  }
+
+  struct FamilyPlan {
+    std::optional<std::int64_t> metric; // empty leaves the family untouched
+    bool reset = false;                 // no room underneath; competitors go back to automatic
+  };
+
+  // Beat the strongest link actually installed right now rather than assuming
+  // what it is. A route whose metric could not be read forces the reset path,
+  // since guessing could silently lose the race.
+  FamilyPlan planFamily(const std::vector<FamilyRoute>& routes) {
+    std::optional<std::int64_t> lowest;
+    for (const auto& route : routes) {
+      if (route.unknown) {
+        return {.reset = true};
+      }
+      if (route.metric.has_value()) {
+        lowest = lowest.has_value() ? std::min(*lowest, *route.metric) : *route.metric;
+      }
+    }
+    if (!lowest.has_value()) {
+      return {};
+    }
+    if (*lowest > kMinPromotedRouteMetric) {
+      return {.metric = *lowest - 1};
+    }
+    return {.reset = true};
+  }
+
+  bool isVirtualWiredType(std::string_view type) {
+    return std::ranges::find(kNmVirtualWiredConnectionTypes, type) != kNmVirtualWiredConnectionTypes.end();
+  }
+
+  bool isWiredLinkType(std::string_view type) { return type == kNmWiredConnectionType || isVirtualWiredType(type); }
+
+  // Tunnels route by their own policy, which promoting a link should not fight.
+  bool isTunnelType(std::string_view type) {
+    return type == kNmVpnConnectionType || type == kNmWireguardConnectionType || type == "ip-tunnel" || type == "tun";
+  }
+
+  std::string metricText(std::optional<std::int64_t> metric) {
+    return metric.has_value() ? std::to_string(*metric) : "unchanged";
+  }
+
   // Tracks in-flight async refresh operations so we only emit state changes after all complete.
   struct PendingRefresh {
     std::vector<AccessPointInfo> capturedAps;
     std::vector<VpnConnectionInfo> capturedVpns;
     std::vector<std::string> capturedSaved;
-    std::vector<std::string> capturedWired;
+    std::vector<WiredConnectionInfo> capturedWired;
     std::vector<std::string> capturedCellular;
     int pendingOps = 0;
   };
 
   struct SavedConnectionsState {
     std::vector<std::string> ssids;
-    std::vector<std::string> wiredConnectionPaths;
+    std::vector<WiredConnectionInfo> wiredConnections;
     std::vector<std::string> cellularConnectionPaths;
     int pending = 0;
   };
@@ -111,6 +247,19 @@ namespace {
     std::set<std::string> activatedProfilePaths; // profiles fully activated only
     std::set<std::string> vpnActivePaths;        // active-connection object paths belonging to VPN profiles
     bool anyCellularActive = false;              // a gsm active connection is activating or activated
+    int pending = 0;
+  };
+
+  // Two independent walks feeding one result: which wired profiles a present NIC
+  // could actually activate, and the address every active link holds. Addresses
+  // are keyed both ways because a wired row knows its profile while an access
+  // point knows only its device.
+  struct LinkDetailScan {
+    std::set<std::string> availableProfilePaths;
+    std::map<std::string, std::string> ipv4ByProfilePath;
+    std::map<std::string, std::string> ipv4ByDevicePath;
+    std::map<std::string, std::string> devicePathByProfilePath;
+    std::map<std::string, std::string> profilePathByDevicePath;
     int pending = 0;
   };
 
@@ -146,6 +295,26 @@ namespace {
   };
 
 } // namespace
+
+// A physical link competing for the default route, and the routes it holds.
+struct NetworkManagerService::CompetingLink {
+  std::string profilePath;
+  std::string devicePath;
+  FamilyRoute ipv4;
+  FamilyRoute ipv6;
+};
+
+// Route metrics to write into a profile; an empty family is left as it is.
+struct NetworkManagerService::RouteMetrics {
+  std::optional<std::int64_t> ipv4;
+  std::optional<std::int64_t> ipv6;
+};
+
+struct NetworkManagerService::PromotionScan {
+  std::vector<CompetingLink> competitors;
+  int pending = 0;
+  std::function<void(std::vector<CompetingLink>)> done;
+};
 
 struct NetworkManagerService::PendingAccessPointActivation {
   std::string ssid;
@@ -264,8 +433,15 @@ void NetworkManagerService::detach() {
   m_accessPoints.clear();
   m_vpnConnections.clear();
   m_savedSsids.clear();
-  m_savedWiredConnectionPaths.clear();
+  m_wiredConnections.clear();
   m_savedCellularConnectionPaths.clear();
+  m_activeProfilePaths.clear();
+  m_wiredAvailableProfilePaths.clear();
+  m_ipv4ByProfilePath.clear();
+  m_ipv4ByDevicePath.clear();
+  m_devicePathByProfilePath.clear();
+  m_profilePathByDevicePath.clear();
+  m_reactivationWatcher.reset();
   m_refreshInFlight = false;
   m_refreshQueued = false;
   m_rebindInFlight = false;
@@ -305,15 +481,38 @@ void NetworkManagerService::refresh() {
   pending->capturedAps = m_accessPoints;
   pending->capturedVpns = m_vpnConnections;
   pending->capturedSaved = m_savedSsids;
-  pending->capturedWired = m_savedWiredConnectionPaths;
+  pending->capturedWired = m_wiredConnections;
   pending->capturedCellular = m_savedCellularConnectionPaths;
-  pending->pendingOps = 3;
+  pending->pendingOps = 4;
 
   // Must stay local: `pending` must not own a callback that captures `pending`, or the refresh
   // state cannot be freed when the completion path is skipped (e.g. lifetime expiry).
   auto onAllComplete = [this, pending, lifetimeToken]() {
     if (lifetimeToken.expired()) {
       return;
+    }
+    // Every scan has finished by now, so the pieces of a wired row — the profile,
+    // whether a NIC can carry it, whether it is up, and its address — can finally
+    // be joined. An active profile is kept even if the device walk missed it;
+    // hiding a connection the user is currently on would be worse than a stale row.
+    // Virtual links have no device until they are up, so they are always kept.
+    std::erase_if(m_wiredConnections, [this](const WiredConnectionInfo& wired) {
+      return !wired.virtualLink
+          && !m_wiredAvailableProfilePaths.contains(wired.path)
+          && !m_activeProfilePaths.contains(wired.path);
+    });
+    for (auto& wired : m_wiredConnections) {
+      wired.active = m_activeProfilePaths.contains(wired.path);
+      const auto ipIt = m_ipv4ByProfilePath.find(wired.path);
+      wired.ipv4 = ipIt != m_ipv4ByProfilePath.end() ? ipIt->second : std::string{};
+      const auto deviceIt = m_devicePathByProfilePath.find(wired.path);
+      wired.devicePath = deviceIt != m_devicePathByProfilePath.end() ? deviceIt->second : std::string{};
+    }
+    // Only the connected access point has an address, and it is the one its
+    // device holds — which is not m_state.ipv4 unless Wi-Fi is also primary.
+    for (auto& ap : m_accessPoints) {
+      const auto ipIt = m_ipv4ByDevicePath.find(ap.devicePath);
+      ap.ipv4 = (ap.active && ipIt != m_ipv4ByDevicePath.end()) ? ipIt->second : std::string{};
     }
     readStateAsync([this, pending, lifetimeToken](NetworkState next) {
       if (lifetimeToken.expired()) {
@@ -322,7 +521,7 @@ void NetworkManagerService::refresh() {
       const bool apsChanged = pending->capturedAps != m_accessPoints;
       const bool vpnsChanged = pending->capturedVpns != m_vpnConnections;
       const bool savedChanged = pending->capturedSaved != m_savedSsids;
-      const bool wiredChanged = pending->capturedWired != m_savedWiredConnectionPaths;
+      const bool wiredChanged = pending->capturedWired != m_wiredConnections;
       const bool cellularChanged = pending->capturedCellular != m_savedCellularConnectionPaths;
       const bool stateChanged = next != m_state;
       const bool firstSnapshot = !m_hasStateSnapshot;
@@ -370,6 +569,7 @@ void NetworkManagerService::refresh() {
   refreshAccessPoints(onOpComplete);
   refreshVpnAndActiveConnections(onOpComplete);
   refreshSavedConnections(onOpComplete);
+  refreshLinkDetails(onOpComplete);
 }
 
 void NetworkManagerService::requestScan() {
@@ -930,20 +1130,180 @@ bool NetworkManagerService::deactivateConnectionsByProfilePaths(
   }
 }
 
-bool NetworkManagerService::canActivateWiredConnection() const noexcept { return !m_savedWiredConnectionPaths.empty(); }
+bool NetworkManagerService::canActivateWiredConnection() const noexcept { return !m_wiredConnections.empty(); }
 
 bool NetworkManagerService::activateWiredConnection() {
   if (m_state.kind == NetworkConnectivity::Wired && m_state.connected) {
     return true;
   }
-  if (m_savedWiredConnectionPaths.empty()) {
+  if (m_wiredConnections.empty()) {
     return false;
   }
-  // The saved list is sorted by object path, which says nothing about which
-  // profile can actually activate — try each in turn until one succeeds.
-  auto candidates = std::make_shared<std::vector<std::string>>(m_savedWiredConnectionPaths);
+  // The saved list order says nothing about which profile can actually
+  // activate — try each in turn until one succeeds.
+  auto candidates = std::make_shared<std::vector<std::string>>();
+  candidates->reserve(m_wiredConnections.size());
+  for (const auto& wired : m_wiredConnections) {
+    candidates->push_back(wired.path);
+  }
   tryActivateWiredConnection(std::move(candidates), 0);
   return true;
+}
+
+bool NetworkManagerService::activateWiredConnection(const WiredConnectionInfo& wired) {
+  if (!available() || wired.path.empty()) {
+    return false;
+  }
+  tryActivateWiredConnection(std::make_shared<std::vector<std::string>>(std::vector{wired.path}), 0);
+  return true;
+}
+
+bool NetworkManagerService::deactivateWiredConnection(const WiredConnectionInfo& wired) {
+  if (!available() || wired.path.empty()) {
+    return false;
+  }
+  const std::string wiredPath = wired.path;
+  const std::string wiredName = wired.name;
+  const bool virtualLink = wired.virtualLink;
+  const std::weak_ptr<int> lifetimeToken = m_lifetimeToken;
+  try {
+    m_nm->callMethodAsync("Get")
+        .onInterface(kPropertiesInterface)
+        .withArguments(kNmInterface, "ActiveConnections")
+        .uponReplyInvoke([this, lifetimeToken, wiredPath, wiredName,
+                          virtualLink](std::optional<sdbus::Error> err, sdbus::Variant activeListValue) {
+          if (lifetimeToken.expired()) {
+            return;
+          }
+          std::vector<sdbus::ObjectPath> activePaths;
+          if (!err.has_value()) {
+            try {
+              activePaths = activeListValue.get<std::vector<sdbus::ObjectPath>>();
+            } catch (const sdbus::Error&) {
+            }
+          }
+          if (activePaths.empty()) {
+            kLog.debug("disconnect(wired): no active connections name={}", wiredName);
+            m_emitOnNextRefresh = true;
+            refresh();
+            return;
+          }
+
+          auto lookup = std::make_shared<DeactivateLookup>();
+          lookup->pending = static_cast<int>(activePaths.size());
+
+          auto onLookupComplete = [this, lifetimeToken, lookup, wiredName]() {
+            if (lifetimeToken.expired()) {
+              return;
+            }
+            if (--lookup->pending == 0 && !lookup->dispatched) {
+              kLog.debug("disconnect(wired): no matching active connection name={}", wiredName);
+              m_emitOnNextRefresh = true;
+              refresh();
+            }
+          };
+
+          for (const auto& activePath : activePaths) {
+            try {
+              auto active =
+                  std::shared_ptr<sdbus::IProxy>(sdbus::createProxy(m_bus.connection(), kNmBusName, activePath));
+              const std::string activePathStr{activePath};
+              active->callMethodAsync("GetAll")
+                  .onInterface(kPropertiesInterface)
+                  .withArguments(kNmActiveConnectionInterface)
+                  .uponReplyInvoke([this, lifetimeToken, active, lookup, activePathStr, wiredPath, virtualLink,
+                                    onLookupComplete](
+                                       std::optional<sdbus::Error> getAllErr,
+                                       std::map<std::string, sdbus::Variant> properties
+                                   ) {
+                    if (lifetimeToken.expired()) {
+                      return;
+                    }
+                    if (!getAllErr.has_value() && !lookup->dispatched) {
+                      std::string profilePath;
+                      if (auto connIt = properties.find("Connection"); connIt != properties.end()) {
+                        try {
+                          profilePath = connIt->second.get<sdbus::ObjectPath>();
+                        } catch (const sdbus::Error&) {
+                        }
+                      }
+                      if (profilePath == wiredPath) {
+                        std::string devicePath;
+                        if (auto devIt = properties.find("Devices"); devIt != properties.end()) {
+                          try {
+                            const auto devices = devIt->second.get<std::vector<sdbus::ObjectPath>>();
+                            if (!devices.empty()) {
+                              devicePath = devices.front();
+                            }
+                          } catch (const sdbus::Error&) {
+                          }
+                        }
+                        lookup->dispatched = true;
+                        // Disconnecting a virtual device destroys it, so a bridge or bond
+                        // is deactivated instead.
+                        disconnectWiredActiveConnection(activePathStr, virtualLink ? std::string{} : devicePath);
+                      }
+                    }
+                    onLookupComplete();
+                  });
+            } catch (const sdbus::Error&) {
+              onLookupComplete();
+            }
+          }
+        });
+    return true;
+  } catch (const sdbus::Error& e) {
+    kLog.warn("disconnect(wired) lookup dispatch failed path={}: {}", wired.path, e.what());
+    return false;
+  }
+}
+
+// Device.Disconnect keeps the link down until the user activates it again;
+// DeactivateConnection would be undone right away by the profile's autoconnect.
+void NetworkManagerService::disconnectWiredActiveConnection(
+    const std::string& activePath, const std::string& devicePath
+) {
+  const std::weak_ptr<int> lifetimeToken = m_lifetimeToken;
+  if (!devicePath.empty() && devicePath != "/") {
+    try {
+      auto device = std::shared_ptr<sdbus::IProxy>(
+          sdbus::createProxy(m_bus.connection(), kNmBusName, sdbus::ObjectPath{devicePath})
+      );
+      device->callMethodAsync("Disconnect")
+          .onInterface(kNmDeviceInterface)
+          .uponReplyInvoke([this, lifetimeToken, device, devicePath](std::optional<sdbus::Error> err) {
+            if (lifetimeToken.expired()) {
+              return;
+            }
+            if (err.has_value()) {
+              kLog.warn("Device.Disconnect(wired) failed path={}: {}", devicePath, err->what());
+            }
+            m_emitOnNextRefresh = true;
+            requestRebind();
+          });
+      return;
+    } catch (const sdbus::Error& e) {
+      kLog.warn("Device.Disconnect(wired) dispatch failed path={}: {}", devicePath, e.what());
+    }
+  }
+
+  try {
+    m_nm->callMethodAsync("DeactivateConnection")
+        .onInterface(kNmInterface)
+        .withArguments(sdbus::ObjectPath{activePath})
+        .uponReplyInvoke([this, lifetimeToken, activePath](std::optional<sdbus::Error> err) {
+          if (lifetimeToken.expired()) {
+            return;
+          }
+          if (err.has_value()) {
+            kLog.warn("DeactivateConnection(wired) failed active={}: {}", activePath, err->what());
+          }
+          m_emitOnNextRefresh = true;
+          refresh();
+        });
+  } catch (const sdbus::Error& e) {
+    kLog.warn("DeactivateConnection(wired) dispatch failed active={}: {}", activePath, e.what());
+  }
 }
 
 void NetworkManagerService::tryActivateWiredConnection(
@@ -1094,6 +1454,452 @@ void NetworkManagerService::setWirelessEnabled(bool enabled, WirelessEnabledComp
     if (onComplete) {
       onComplete(false);
     }
+  }
+}
+
+bool NetworkManagerService::makePrimary(const AccessPointInfo& ap) {
+  if (!ap.active || ap.devicePath.empty()) {
+    return false;
+  }
+  // An access point knows its device but not the profile behind it; the active
+  // connection walk pairs the two.
+  const auto it = m_profilePathByDevicePath.find(ap.devicePath);
+  if (it == m_profilePathByDevicePath.end()) {
+    return false;
+  }
+  return makeProfilePrimary(it->second, ap.devicePath);
+}
+
+bool NetworkManagerService::makePrimary(const WiredConnectionInfo& wired) {
+  if (!wired.active || wired.path.empty()) {
+    return false;
+  }
+  return makeProfilePrimary(wired.path, wired.devicePath);
+}
+
+// NetworkManager has no "prefer this link" call — the default route follows the
+// lowest route metric (ethernet defaults to 100, wifi to 600). So drop the
+// profile's metric below every other active physical link and re-activate it,
+// which is what makes NM recompute the default route. The metric is written in
+// memory only, so nothing lands in the user's saved profile and a NetworkManager
+// restart forgets the preference.
+bool NetworkManagerService::makeProfilePrimary(const std::string& profilePath, const std::string& devicePath) {
+  if (!available() || profilePath.empty()) {
+    return false;
+  }
+  const std::weak_ptr<int> lifetimeToken = m_lifetimeToken;
+  collectCompetingLinks(
+      profilePath, [this, lifetimeToken, profilePath, devicePath](std::vector<CompetingLink> competitors) {
+        if (lifetimeToken.expired()) {
+          return;
+        }
+
+        // IPv4 and IPv6 pick their default route independently, so each family has
+        // to be won against its own competitors.
+        std::vector<FamilyRoute> ipv4Routes;
+        std::vector<FamilyRoute> ipv6Routes;
+        for (const auto& link : competitors) {
+          ipv4Routes.push_back(link.ipv4);
+          ipv6Routes.push_back(link.ipv6);
+        }
+        const FamilyPlan ipv4 = planFamily(ipv4Routes);
+        const FamilyPlan ipv6 = planFamily(ipv6Routes);
+        const RouteMetrics promoted{
+            .ipv4 = ipv4.reset ? std::optional{kDefaultPromotedRouteMetric} : ipv4.metric,
+            .ipv6 = ipv6.reset ? std::optional{kDefaultPromotedRouteMetric} : ipv6.metric,
+        };
+
+        if (!ipv4.reset && !ipv6.reset) {
+          applyRouteMetric(profilePath, devicePath, promoted, nullptr);
+          return;
+        }
+
+        // No room left underneath — a previous promotion already took the floor.
+        // Hand every competitor back to NM's automatic metric in that family and
+        // re-apply them, then take a comfortable slot. Costs a blip on the links
+        // losing the route, which is why it only happens when undercutting is
+        // impossible.
+        const RouteMetrics automatic{
+            .ipv4 = ipv4.reset ? std::optional{kNmRouteMetricAutomatic} : std::nullopt,
+            .ipv6 = ipv6.reset ? std::optional{kNmRouteMetricAutomatic} : std::nullopt,
+        };
+        kLog.info(
+            "promotion floor reached; resetting {} competing link(s) to automatic metric ipv4={} ipv6={}",
+            competitors.size(), ipv4.reset, ipv6.reset
+        );
+        auto remaining = std::make_shared<int>(static_cast<int>(competitors.size()));
+        for (const auto& link : competitors) {
+          applyRouteMetric(
+              link.profilePath, link.devicePath, automatic,
+              [this, lifetimeToken, remaining, profilePath, devicePath, promoted]() {
+                if (lifetimeToken.expired()) {
+                  return;
+                }
+                if (--*remaining == 0) {
+                  applyRouteMetric(profilePath, devicePath, promoted, nullptr);
+                }
+              }
+          );
+        }
+      }
+  );
+  return true;
+}
+
+// Every active non-tunnel link other than the one being promoted that holds a
+// default route, with the metrics its IPv4 and IPv6 default routes currently
+// carry. Cellular, bridges and the like compete for the route as much as
+// ethernet does.
+void NetworkManagerService::collectCompetingLinks(
+    const std::string& excludeProfilePath, std::function<void(std::vector<CompetingLink>)> done
+) {
+  const std::weak_ptr<int> lifetimeToken = m_lifetimeToken;
+  // A link without a config for the family has no default route in it.
+  const auto readFamily = [this, lifetimeToken](
+                              const std::string& configPath, const char* interface,
+                              std::function<void(FamilyRoute)> onRead
+                          ) {
+    if (configPath.empty() || configPath == "/") {
+      onRead({});
+      return;
+    }
+    try {
+      auto config = std::shared_ptr<sdbus::IProxy>(
+          sdbus::createProxy(m_bus.connection(), kNmBusName, sdbus::ObjectPath{configPath})
+      );
+      config->callMethodAsync("GetAll")
+          .onInterface(kPropertiesInterface)
+          .withArguments(interface)
+          .uponReplyInvoke([lifetimeToken, config, onRead](
+                               std::optional<sdbus::Error> err, std::map<std::string, sdbus::Variant> properties
+                           ) {
+            if (lifetimeToken.expired()) {
+              return;
+            }
+            onRead(err.has_value() ? FamilyRoute{.unknown = true} : defaultRoute(properties));
+          });
+    } catch (const sdbus::Error&) {
+      onRead({.unknown = true});
+    }
+  };
+  try {
+    m_nm->callMethodAsync("Get")
+        .onInterface(kPropertiesInterface)
+        .withArguments(kNmInterface, "ActiveConnections")
+        .uponReplyInvoke([this, lifetimeToken, excludeProfilePath, readFamily,
+                          done](std::optional<sdbus::Error> err, sdbus::Variant activeListValue) {
+          if (lifetimeToken.expired()) {
+            return;
+          }
+          std::vector<sdbus::ObjectPath> activePaths;
+          if (!err.has_value()) {
+            try {
+              activePaths = activeListValue.get<std::vector<sdbus::ObjectPath>>();
+            } catch (const sdbus::Error&) {
+            }
+          }
+          if (activePaths.empty()) {
+            done({});
+            return;
+          }
+
+          auto scan = std::make_shared<PromotionScan>();
+          scan->pending = static_cast<int>(activePaths.size());
+          scan->done = done;
+
+          auto finishOne = [lifetimeToken, scan]() {
+            if (lifetimeToken.expired()) {
+              return;
+            }
+            if (--scan->pending == 0 && scan->done) {
+              scan->done(std::move(scan->competitors));
+            }
+          };
+
+          for (const auto& activePath : activePaths) {
+            try {
+              auto active =
+                  std::shared_ptr<sdbus::IProxy>(sdbus::createProxy(m_bus.connection(), kNmBusName, activePath));
+              active->callMethodAsync("GetAll")
+                  .onInterface(kPropertiesInterface)
+                  .withArguments(kNmActiveConnectionInterface)
+                  .uponReplyInvoke([lifetimeToken, active, scan, excludeProfilePath, readFamily, finishOne](
+                                       std::optional<sdbus::Error> activeErr,
+                                       std::map<std::string, sdbus::Variant> properties
+                                   ) {
+                    if (lifetimeToken.expired()) {
+                      return;
+                    }
+                    if (activeErr.has_value()) {
+                      finishOne();
+                      return;
+                    }
+
+                    std::string type;
+                    if (auto typeIt = properties.find("Type"); typeIt != properties.end()) {
+                      try {
+                        type = typeIt->second.get<std::string>();
+                      } catch (const sdbus::Error&) {
+                      }
+                    }
+                    if (isTunnelType(type)) {
+                      finishOne();
+                      return;
+                    }
+
+                    CompetingLink link;
+                    if (auto connIt = properties.find("Connection"); connIt != properties.end()) {
+                      try {
+                        link.profilePath = connIt->second.get<sdbus::ObjectPath>();
+                      } catch (const sdbus::Error&) {
+                      }
+                    }
+                    if (link.profilePath.empty() || link.profilePath == excludeProfilePath) {
+                      finishOne();
+                      return;
+                    }
+                    if (auto devicesIt = properties.find("Devices"); devicesIt != properties.end()) {
+                      try {
+                        const auto devices = devicesIt->second.get<std::vector<sdbus::ObjectPath>>();
+                        if (!devices.empty()) {
+                          link.devicePath = devices.front();
+                        }
+                      } catch (const sdbus::Error&) {
+                      }
+                    }
+
+                    const auto configPath = [&properties](const char* key) {
+                      std::string path;
+                      if (auto it = properties.find(key); it != properties.end()) {
+                        try {
+                          path = it->second.get<sdbus::ObjectPath>();
+                        } catch (const sdbus::Error&) {
+                        }
+                      }
+                      return path;
+                    };
+                    const std::string ip6ConfigPath = configPath("Ip6Config");
+                    readFamily(
+                        configPath("Ip4Config"), k_nmIp4ConfigInterface,
+                        [readFamily, ip6ConfigPath, scan, link, finishOne](FamilyRoute ipv4) {
+                          readFamily(
+                              ip6ConfigPath, k_nmIp6ConfigInterface,
+                              [scan, link, ipv4, finishOne](FamilyRoute ipv6) {
+                                const auto holdsRoute = [](const FamilyRoute& route) {
+                                  return route.metric.has_value() || route.unknown;
+                                };
+                                if (holdsRoute(ipv4) || holdsRoute(ipv6)) {
+                                  CompetingLink resolved = link;
+                                  resolved.ipv4 = ipv4;
+                                  resolved.ipv6 = ipv6;
+                                  scan->competitors.push_back(std::move(resolved));
+                                }
+                                finishOne();
+                              }
+                          );
+                        }
+                    );
+                  });
+            } catch (const sdbus::Error&) {
+              finishOne();
+            }
+          }
+        });
+  } catch (const sdbus::Error& e) {
+    kLog.warn("collectCompetingLinks dispatch failed: {}", e.what());
+    done({});
+  }
+}
+
+// Writes route metrics into a profile in memory only, then re-applies the
+// profile so they reach the routing table. kNmRouteMetricAutomatic hands the
+// choice back to NetworkManager.
+void NetworkManagerService::applyRouteMetric(
+    const std::string& profilePath, const std::string& devicePath, const RouteMetrics& metrics,
+    std::function<void()> onDone
+) {
+  if (!metrics.ipv4.has_value() && !metrics.ipv6.has_value()) {
+    if (onDone) {
+      onDone();
+    }
+    return;
+  }
+  const std::weak_ptr<int> lifetimeToken = m_lifetimeToken;
+  try {
+    auto connection = std::shared_ptr<sdbus::IProxy>(
+        sdbus::createProxy(m_bus.connection(), kNmBusName, sdbus::ObjectPath{profilePath})
+    );
+    connection->callMethodAsync("GetSettings")
+        .onInterface(kNmSettingsConnectionInterface)
+        .uponReplyInvoke([this, lifetimeToken, connection, profilePath, devicePath, metrics,
+                          onDone](std::optional<sdbus::Error> err, ConnectionSettings cfg) {
+          if (lifetimeToken.expired()) {
+            return;
+          }
+          if (err.has_value()) {
+            kLog.warn("applyRouteMetric GetSettings failed path={}: {}", profilePath, err->what());
+            if (onDone) {
+              onDone();
+            }
+            return;
+          }
+
+          if (metrics.ipv4.has_value()) {
+            cfg["ipv4"]["route-metric"] = sdbus::Variant{*metrics.ipv4};
+          }
+          if (metrics.ipv6.has_value()) {
+            cfg["ipv6"]["route-metric"] = sdbus::Variant{*metrics.ipv6};
+          }
+
+          const std::map<std::string, sdbus::Variant> args;
+          try {
+            connection->callMethodAsync("Update2")
+                .onInterface(kNmSettingsConnectionInterface)
+                .withArguments(cfg, k_nmSettingsUpdate2FlagInMemory, args)
+                .uponReplyInvoke([this, lifetimeToken, connection, profilePath, devicePath, metrics,
+                                  onDone](std::optional<sdbus::Error> updateErr, VariantMap /*result*/) {
+                  if (lifetimeToken.expired()) {
+                    return;
+                  }
+                  if (updateErr.has_value()) {
+                    kLog.warn("applyRouteMetric Update2 failed path={}: {}", profilePath, updateErr->what());
+                    if (onDone) {
+                      onDone();
+                    }
+                    return;
+                  }
+                  kLog.info(
+                      "applying route metric path={} ipv4={} ipv6={}", profilePath, metricText(metrics.ipv4),
+                      metricText(metrics.ipv6)
+                  );
+                  // The metric only reaches the routing table once the profile is
+                  // applied again, which briefly drops this link.
+                  try {
+                    m_nm->callMethodAsync("ActivateConnection")
+                        .onInterface(kNmInterface)
+                        .withArguments(
+                            sdbus::ObjectPath{profilePath},
+                            sdbus::ObjectPath{devicePath.empty() ? std::string{"/"} : devicePath},
+                            sdbus::ObjectPath{"/"}
+                        )
+                        .uponReplyInvoke([this, lifetimeToken, profilePath, onDone](
+                                             std::optional<sdbus::Error> activateErr, sdbus::ObjectPath activePath
+                                         ) {
+                          if (lifetimeToken.expired()) {
+                            return;
+                          }
+                          if (activateErr.has_value()) {
+                            kLog.warn(
+                                "applyRouteMetric ActivateConnection failed path={}: {}", profilePath,
+                                activateErr->what()
+                            );
+                          } else {
+                            // The refresh below runs while the link is still
+                            // activating, so it sees no address yet. Watch for the
+                            // link settling and refresh again once it has one.
+                            watchReactivation(std::string{activePath});
+                          }
+                          m_emitOnNextRefresh = true;
+                          requestRebind();
+                          if (onDone) {
+                            onDone();
+                          }
+                        });
+                  } catch (const sdbus::Error& e) {
+                    kLog.warn("applyRouteMetric ActivateConnection dispatch failed path={}: {}", profilePath, e.what());
+                    if (onDone) {
+                      onDone();
+                    }
+                  }
+                });
+          } catch (const sdbus::Error& e) {
+            kLog.warn("applyRouteMetric Update2 dispatch failed path={}: {}", profilePath, e.what());
+            if (onDone) {
+              onDone();
+            }
+          }
+        });
+  } catch (const sdbus::Error& e) {
+    kLog.warn("applyRouteMetric GetSettings dispatch failed path={}: {}", profilePath, e.what());
+    if (onDone) {
+      onDone();
+    }
+  }
+}
+
+void NetworkManagerService::watchReactivation(const std::string& activePath) {
+  if (activePath.empty() || activePath == "/") {
+    return;
+  }
+  const std::weak_ptr<int> lifetimeToken = m_lifetimeToken;
+  try {
+    // Replacing the previous watcher here is safe: this runs in an async reply
+    // context, never inside the old watcher's own signal handler.
+    m_reactivationWatcher = sdbus::createProxy(m_bus.connection(), kNmBusName, sdbus::ObjectPath{activePath});
+    m_reactivationWatcher->uponSignal("PropertiesChanged")
+        .onInterface(kPropertiesInterface)
+        .call([this, lifetimeToken, activePath](
+                  const std::string& interfaceName, const std::map<std::string, sdbus::Variant>& changedProperties,
+                  const std::vector<std::string>& /*invalidatedProperties*/
+              ) {
+          if (lifetimeToken.expired() || interfaceName != kNmActiveConnectionInterface) {
+            return;
+          }
+          const auto stateIt = changedProperties.find("State");
+          if (stateIt == changedProperties.end()) {
+            return;
+          }
+          std::uint32_t state = 0;
+          try {
+            state = stateIt->second.get<std::uint32_t>();
+          } catch (const sdbus::Error&) {
+            return;
+          }
+          if (state != kNmActiveConnectionStateActivated) {
+            return;
+          }
+          kLog.debug("re-activated link settled active={}", activePath);
+          // The watcher is left in place rather than erased from inside its own
+          // handler; the next promotion replaces it.
+          m_emitOnNextRefresh = true;
+          requestRebind();
+        });
+  } catch (const sdbus::Error& e) {
+    kLog.debug("watchReactivation failed active={}: {}", activePath, e.what());
+    m_reactivationWatcher.reset();
+  }
+}
+
+bool NetworkManagerService::disconnectAccessPoint(const AccessPointInfo& ap) {
+  if (ap.devicePath.empty() || ap.devicePath == "/") {
+    return false;
+  }
+  // Device.Disconnect keeps the radio associated with nothing until the user
+  // picks a network again, instead of letting autoconnect re-join immediately.
+  const std::string devicePath = ap.devicePath;
+  const std::weak_ptr<int> lifetimeToken = m_lifetimeToken;
+  try {
+    auto device = std::shared_ptr<sdbus::IProxy>(
+        sdbus::createProxy(m_bus.connection(), kNmBusName, sdbus::ObjectPath{devicePath})
+    );
+    device->callMethodAsync("Disconnect")
+        .onInterface(kNmDeviceInterface)
+        .uponReplyInvoke([this, lifetimeToken, device, devicePath](std::optional<sdbus::Error> err) {
+          if (lifetimeToken.expired()) {
+            return;
+          }
+          if (err.has_value()) {
+            kLog.warn("Device.Disconnect(wifi) failed path={}: {}", devicePath, err->what());
+          } else {
+            kLog.info("disconnected wifi device path={}", devicePath);
+          }
+          m_emitOnNextRefresh = true;
+          requestRebind();
+        });
+    return true;
+  } catch (const sdbus::Error& e) {
+    kLog.warn("Device.Disconnect(wifi) dispatch failed path={}: {}", devicePath, e.what());
+    return false;
   }
 }
 
@@ -1333,7 +2139,7 @@ void NetworkManagerService::refreshSavedConnections(std::function<void()> onComp
 
           if (connectionPaths.empty()) {
             m_savedSsids.clear();
-            m_savedWiredConnectionPaths.clear();
+            m_wiredConnections.clear();
             m_savedCellularConnectionPaths.clear();
             onComplete();
             return;
@@ -1345,7 +2151,7 @@ void NetworkManagerService::refreshSavedConnections(std::function<void()> onComp
           auto finishOne = [this, savedState, onComplete]() {
             if (--savedState->pending == 0) {
               finishSavedConnections(
-                  savedState->ssids, savedState->wiredConnectionPaths, savedState->cellularConnectionPaths, onComplete
+                  savedState->ssids, savedState->wiredConnections, savedState->cellularConnectionPaths, onComplete
               );
             }
           };
@@ -1378,7 +2184,9 @@ void NetworkManagerService::refreshSavedConnections(std::function<void()> onComp
                         }
                       }
                     }
-                    if (metaErr.has_value() || ((flags & kNmSettingsConnectionFlagUnsaved) != 0U && filename.empty())) {
+                    if (metaErr.has_value()
+                        || (flags & kNmSettingsConnectionFlagExternal) != 0U
+                        || ((flags & kNmSettingsConnectionFlagUnsaved) != 0U && filename.empty())) {
                       finishOne();
                       return;
                     }
@@ -1399,8 +2207,30 @@ void NetworkManagerService::refreshSavedConnections(std::function<void()> onComp
                                 if (typeIt != connIt->second.end()) {
                                   try {
                                     const auto type = typeIt->second.get<std::string>();
-                                    if (type == kNmWiredConnectionType) {
-                                      savedState->wiredConnectionPaths.emplace_back(connectionPath);
+                                    // A member of a bridge or bond never holds an address of its
+                                    // own; the link it belongs to is listed instead.
+                                    bool member = false;
+                                    if (auto masterIt = connIt->second.find("master");
+                                        masterIt != connIt->second.end()) {
+                                      try {
+                                        member = !masterIt->second.get<std::string>().empty();
+                                      } catch (const sdbus::Error&) {
+                                      }
+                                    }
+                                    if (isWiredLinkType(type) && !member) {
+                                      WiredConnectionInfo info;
+                                      info.path = std::string(connectionPath);
+                                      info.virtualLink = isVirtualWiredType(type);
+                                      if (auto idIt = connIt->second.find("id"); idIt != connIt->second.end()) {
+                                        try {
+                                          info.name = idIt->second.get<std::string>();
+                                        } catch (const sdbus::Error&) {
+                                        }
+                                      }
+                                      if (info.name.empty()) {
+                                        info.name = info.path;
+                                      }
+                                      savedState->wiredConnections.push_back(std::move(info));
                                     } else if (type == kNmCellularConnectionType) {
                                       savedState->cellularConnectionPaths.emplace_back(connectionPath);
                                     }
@@ -1426,7 +2256,7 @@ void NetworkManagerService::refreshSavedConnections(std::function<void()> onComp
                             }
                             if (--savedState->pending == 0) {
                               finishSavedConnections(
-                                  savedState->ssids, savedState->wiredConnectionPaths,
+                                  savedState->ssids, savedState->wiredConnections,
                                   savedState->cellularConnectionPaths, onComplete
                               );
                             }
@@ -1443,6 +2273,232 @@ void NetworkManagerService::refreshSavedConnections(std::function<void()> onComp
   } catch (const sdbus::Error& e) {
     kLog.debug("refreshSavedConnections: {}", e.what());
     onComplete();
+  }
+}
+
+// A wired profile is only worth showing when some present NIC could activate it:
+// NM keeps profiles for docks and adapters that are not plugged in, and clicking
+// one of those can only ever fail. AvailableConnections answers exactly that, and
+// it stays populated for the profile that is currently up.
+void NetworkManagerService::refreshLinkDetails(std::function<void()> onComplete) {
+  const std::weak_ptr<int> lifetimeToken = m_lifetimeToken;
+  auto scan = std::make_shared<LinkDetailScan>();
+  scan->pending = 2; // the ethernet device walk, and the active connection walk
+
+  auto finishWalk = [this, lifetimeToken, scan, onComplete]() {
+    if (lifetimeToken.expired()) {
+      return;
+    }
+    if (--scan->pending > 0) {
+      return;
+    }
+    m_wiredAvailableProfilePaths = std::move(scan->availableProfilePaths);
+    m_ipv4ByProfilePath = std::move(scan->ipv4ByProfilePath);
+    m_ipv4ByDevicePath = std::move(scan->ipv4ByDevicePath);
+    m_devicePathByProfilePath = std::move(scan->devicePathByProfilePath);
+    m_profilePathByDevicePath = std::move(scan->profilePathByDevicePath);
+    onComplete();
+  };
+
+  try {
+    m_nm->callMethodAsync("GetDevices")
+        .onInterface(kNmInterface)
+        .uponReplyInvoke([this, lifetimeToken, scan,
+                          finishWalk](std::optional<sdbus::Error> err, std::vector<sdbus::ObjectPath> devices) {
+          if (lifetimeToken.expired()) {
+            return;
+          }
+          if (err.has_value() || devices.empty()) {
+            finishWalk();
+            return;
+          }
+
+          auto devicesPending = std::make_shared<int>(static_cast<int>(devices.size()));
+          auto finishDevice = [devicesPending, finishWalk]() {
+            if (--*devicesPending == 0) {
+              finishWalk();
+            }
+          };
+
+          for (const auto& devicePath : devices) {
+            try {
+              auto device =
+                  std::shared_ptr<sdbus::IProxy>(sdbus::createProxy(m_bus.connection(), kNmBusName, devicePath));
+              device->callMethodAsync("GetAll")
+                  .onInterface(kPropertiesInterface)
+                  .withArguments(kNmDeviceInterface)
+                  .uponReplyInvoke([lifetimeToken, device, scan, finishDevice](
+                                       std::optional<sdbus::Error> deviceErr,
+                                       std::map<std::string, sdbus::Variant> properties
+                                   ) {
+                    if (lifetimeToken.expired()) {
+                      return;
+                    }
+                    if (!deviceErr.has_value()) {
+                      std::uint32_t deviceType = 0;
+                      if (auto typeIt = properties.find("DeviceType"); typeIt != properties.end()) {
+                        try {
+                          deviceType = typeIt->second.get<std::uint32_t>();
+                        } catch (const sdbus::Error&) {
+                        }
+                      }
+                      if (deviceType == kNmDeviceTypeEthernet) {
+                        if (auto availableIt = properties.find("AvailableConnections");
+                            availableIt != properties.end()) {
+                          try {
+                            for (const auto& profilePath : availableIt->second.get<std::vector<sdbus::ObjectPath>>()) {
+                              scan->availableProfilePaths.insert(std::string(profilePath));
+                            }
+                          } catch (const sdbus::Error&) {
+                          }
+                        }
+                      }
+                    }
+                    finishDevice();
+                  });
+            } catch (const sdbus::Error&) {
+              finishDevice();
+            }
+          }
+        });
+  } catch (const sdbus::Error& e) {
+    kLog.debug("refreshLinkDetails GetDevices dispatch failed: {}", e.what());
+    finishWalk();
+  }
+
+  try {
+    m_nm->callMethodAsync("Get")
+        .onInterface(kPropertiesInterface)
+        .withArguments(kNmInterface, "ActiveConnections")
+        .uponReplyInvoke([this, lifetimeToken, scan,
+                          finishWalk](std::optional<sdbus::Error> err, sdbus::Variant activeListValue) {
+          if (lifetimeToken.expired()) {
+            return;
+          }
+          std::vector<sdbus::ObjectPath> activePaths;
+          if (!err.has_value()) {
+            try {
+              activePaths = activeListValue.get<std::vector<sdbus::ObjectPath>>();
+            } catch (const sdbus::Error&) {
+            }
+          }
+          if (activePaths.empty()) {
+            finishWalk();
+            return;
+          }
+
+          auto activePending = std::make_shared<int>(static_cast<int>(activePaths.size()));
+          auto finishActive = [activePending, finishWalk]() {
+            if (--*activePending == 0) {
+              finishWalk();
+            }
+          };
+
+          for (const auto& activePath : activePaths) {
+            try {
+              auto active =
+                  std::shared_ptr<sdbus::IProxy>(sdbus::createProxy(m_bus.connection(), kNmBusName, activePath));
+              active->callMethodAsync("GetAll")
+                  .onInterface(kPropertiesInterface)
+                  .withArguments(kNmActiveConnectionInterface)
+                  .uponReplyInvoke([this, lifetimeToken, active, scan, finishActive](
+                                       std::optional<sdbus::Error> activeErr,
+                                       std::map<std::string, sdbus::Variant> properties
+                                   ) {
+                    if (lifetimeToken.expired()) {
+                      return;
+                    }
+                    // Every active link is recorded, not just the wired ones: a
+                    // Wi-Fi row needs its own address too, and NetworkState only
+                    // ever carries the primary link's.
+                    std::string profilePath;
+                    std::string devicePath;
+                    std::string ip4ConfigPath;
+                    // A VPN's active connection lists the physical device it runs
+                    // over and an Ip4Config holding the tunnel address. Keying
+                    // either by device would let the VPN answer for the link
+                    // underneath it, so only physical links get device-keyed
+                    // entries. Profile-keyed ones cannot collide and take anything.
+                    bool physical = false;
+                    if (!activeErr.has_value()) {
+                      std::string type;
+                      if (auto typeIt = properties.find("Type"); typeIt != properties.end()) {
+                        try {
+                          type = typeIt->second.get<std::string>();
+                        } catch (const sdbus::Error&) {
+                        }
+                      }
+                      physical = isWiredLinkType(type) || type == kNmWirelessConnectionType;
+                      if (auto connIt = properties.find("Connection"); connIt != properties.end()) {
+                        try {
+                          profilePath = connIt->second.get<sdbus::ObjectPath>();
+                        } catch (const sdbus::Error&) {
+                        }
+                      }
+                      if (auto devicesIt = properties.find("Devices"); devicesIt != properties.end()) {
+                        try {
+                          const auto devices = devicesIt->second.get<std::vector<sdbus::ObjectPath>>();
+                          if (!devices.empty()) {
+                            devicePath = devices.front();
+                          }
+                        } catch (const sdbus::Error&) {
+                        }
+                      }
+                      if (auto ip4It = properties.find("Ip4Config"); ip4It != properties.end()) {
+                        try {
+                          ip4ConfigPath = ip4It->second.get<sdbus::ObjectPath>();
+                        } catch (const sdbus::Error&) {
+                        }
+                      }
+                    }
+                    if (physical && !profilePath.empty() && !devicePath.empty()) {
+                      scan->devicePathByProfilePath.emplace(profilePath, devicePath);
+                      scan->profilePathByDevicePath.emplace(devicePath, profilePath);
+                    }
+                    if ((profilePath.empty() && devicePath.empty()) || ip4ConfigPath.empty() || ip4ConfigPath == "/") {
+                      finishActive();
+                      return;
+                    }
+
+                    try {
+                      auto ip4 = std::shared_ptr<sdbus::IProxy>(
+                          sdbus::createProxy(m_bus.connection(), kNmBusName, sdbus::ObjectPath{ip4ConfigPath})
+                      );
+                      ip4->callMethodAsync("GetAll")
+                          .onInterface(kPropertiesInterface)
+                          .withArguments(k_nmIp4ConfigInterface)
+                          .uponReplyInvoke([lifetimeToken, ip4, scan, profilePath, devicePath, physical, finishActive](
+                                               std::optional<sdbus::Error> ip4Err,
+                                               std::map<std::string, sdbus::Variant> ip4Properties
+                                           ) {
+                            if (lifetimeToken.expired()) {
+                              return;
+                            }
+                            if (!ip4Err.has_value()) {
+                              const std::string address = ipv4FromIp4Config(ip4Properties);
+                              if (!address.empty()) {
+                                if (!profilePath.empty()) {
+                                  scan->ipv4ByProfilePath.emplace(profilePath, address);
+                                }
+                                if (physical && !devicePath.empty()) {
+                                  scan->ipv4ByDevicePath.emplace(devicePath, address);
+                                }
+                              }
+                            }
+                            finishActive();
+                          });
+                    } catch (const sdbus::Error&) {
+                      finishActive();
+                    }
+                  });
+            } catch (const sdbus::Error&) {
+              finishActive();
+            }
+          }
+        });
+  } catch (const sdbus::Error& e) {
+    kLog.debug("refreshLinkDetails ActiveConnections dispatch failed: {}", e.what());
+    finishWalk();
   }
 }
 
@@ -1468,6 +2524,7 @@ void NetworkManagerService::refreshVpnAndActiveConnections(std::function<void()>
             m_vpnConnections.clear();
             m_anyVpnConnected = false;
             m_anyCellularActive = false;
+            m_activeProfilePaths.clear();
             reconcileVpnActiveWatchers({});
             onComplete();
             return;
@@ -1506,6 +2563,7 @@ void NetworkManagerService::refreshVpnAndActiveConnections(std::function<void()>
                     kLog.debug("refreshVpnAndActiveConnections active list failed: {}", activeListErr->what());
                     m_anyVpnConnected = false;
                     m_anyCellularActive = false;
+                    m_activeProfilePaths.clear();
                     reconcileVpnActiveWatchers({});
                     finalize();
                     return;
@@ -1517,6 +2575,7 @@ void NetworkManagerService::refreshVpnAndActiveConnections(std::function<void()>
                   } catch (const sdbus::Error&) {
                     m_anyVpnConnected = false;
                     m_anyCellularActive = false;
+                    m_activeProfilePaths.clear();
                     reconcileVpnActiveWatchers({});
                     finalize();
                     return;
@@ -1525,6 +2584,7 @@ void NetworkManagerService::refreshVpnAndActiveConnections(std::function<void()>
                   if (activePaths.empty()) {
                     m_anyVpnConnected = false;
                     m_anyCellularActive = false;
+                    m_activeProfilePaths.clear();
                     reconcileVpnActiveWatchers({});
                     finalize();
                     return;
@@ -1549,6 +2609,7 @@ void NetworkManagerService::refreshVpnAndActiveConnections(std::function<void()>
                       }
                       m_anyVpnConnected = anyConnected;
                       m_anyCellularActive = activeState->anyCellularActive;
+                      m_activeProfilePaths = activeState->activeProfilePaths;
                       reconcileVpnActiveWatchers(activeState->vpnActivePaths);
                       finalize();
                     }
@@ -2002,16 +3063,22 @@ void NetworkManagerService::refreshAccessPoints(std::function<void()> onComplete
 }
 
 void NetworkManagerService::finishSavedConnections(
-    std::vector<std::string>& ssids, std::vector<std::string>& wiredConnectionPaths,
+    std::vector<std::string>& ssids, std::vector<WiredConnectionInfo>& wiredConnections,
     std::vector<std::string>& cellularConnectionPaths, std::function<void()> onComplete
 ) {
   std::ranges::sort(ssids);
   ssids.erase(std::ranges::unique(ssids).begin(), ssids.end());
   m_savedSsids = std::move(ssids);
 
-  std::ranges::sort(wiredConnectionPaths);
-  wiredConnectionPaths.erase(std::ranges::unique(wiredConnectionPaths).begin(), wiredConnectionPaths.end());
-  m_savedWiredConnectionPaths = std::move(wiredConnectionPaths);
+  // Sorted by name only: the active flag is joined in later, after the
+  // active-connection scan completes, so it cannot participate in the order.
+  std::ranges::sort(wiredConnections, [](const WiredConnectionInfo& a, const WiredConnectionInfo& b) {
+    if (a.name != b.name) {
+      return a.name < b.name;
+    }
+    return a.path < b.path;
+  });
+  m_wiredConnections = std::move(wiredConnections);
 
   std::ranges::sort(cellularConnectionPaths);
   cellularConnectionPaths.erase(std::ranges::unique(cellularConnectionPaths).begin(), cellularConnectionPaths.end());
@@ -2413,6 +3480,7 @@ void NetworkManagerService::readStateAsync(std::function<void(NetworkState)> onC
   auto next = std::make_shared<NetworkState>();
   next->scanning = m_scanning;
   next->vpnConnected = m_anyVpnConnected;
+  next->primaryDevicePath = m_activeDevicePath;
   next->cellularActive = m_anyCellularActive;
 
   bool vpnFromList = false;
@@ -2577,39 +3645,7 @@ void NetworkManagerService::readStateAsync(std::function<void(NetworkState)> onC
                         return;
                       }
                       if (!ip4Err.has_value()) {
-                        if (auto addressDataIt = ip4Properties.find("AddressData");
-                            addressDataIt != ip4Properties.end()) {
-                          try {
-                            const auto addressData =
-                                addressDataIt->second.get<std::vector<std::map<std::string, sdbus::Variant>>>();
-                            for (const auto& entry : addressData) {
-                              auto addressIt = entry.find("address");
-                              if (addressIt == entry.end()) {
-                                continue;
-                              }
-                              try {
-                                next->ipv4 = addressIt->second.get<std::string>();
-                              } catch (const sdbus::Error&) {
-                              }
-                              if (!next->ipv4.empty()) {
-                                break;
-                              }
-                            }
-                          } catch (const sdbus::Error&) {
-                          }
-                        }
-
-                        if (next->ipv4.empty()) {
-                          if (auto addressesIt = ip4Properties.find("Addresses"); addressesIt != ip4Properties.end()) {
-                            try {
-                              const auto addresses = addressesIt->second.get<std::vector<std::vector<std::uint32_t>>>();
-                              if (!addresses.empty() && !addresses.front().empty()) {
-                                next->ipv4 = ipv4FromUint(addresses.front().front());
-                              }
-                            } catch (const sdbus::Error&) {
-                            }
-                          }
-                        }
+                        next->ipv4 = ipv4FromIp4Config(ip4Properties);
                       }
                       finishAfterIp4();
                     });

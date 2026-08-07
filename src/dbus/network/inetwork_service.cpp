@@ -18,6 +18,11 @@ namespace {
 
 } // namespace
 
+const std::vector<WiredConnectionInfo>& INetworkService::wiredConnections() const noexcept {
+  static const std::vector<WiredConnectionInfo> kNone;
+  return kNone;
+}
+
 void INetworkService::registerIpc(IpcService& ipc, WirelessFeedbackCallback wirelessFeedback) {
   auto setWifi = [this, wirelessFeedback](bool enabled) -> std::string {
     if (!hasStateSnapshot()) {

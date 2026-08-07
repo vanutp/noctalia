@@ -324,7 +324,6 @@
       "cellular": "Cellular",
       "cellular-connected": "Connected",
       "cellular-connecting": "Connecting…",
-      "cellular-connection": "Cellular connection",
       "cellular-enabling": "Turning on…",
       "cellular-failed": "Failed",
       "cellular-locked": "SIM locked",
@@ -333,7 +332,6 @@
       "cellular-registered": "Registered",
       "cellular-searching": "Searching…",
       "connect": "Connect",
-      "current-connection": "Current Connection",
       "domain-suffix-match": "Server domain suffix",
       "eap-method": "EAP method",
       "enterprise-prompt-for": "Sign in to {ssid}",
@@ -346,7 +344,6 @@
       "external-ip": "WAN {ip}",
       "identity": "Identity",
       "no-networks": "No networks in range",
-      "not-connected": "Not connected",
       "password": "Password",
       "password-prompt": "Enter password",
       "password-prompt-for": "Enter password for {ssid}",
@@ -356,9 +353,7 @@
       "unavailable-title": "Network service unavailable",
       "wi-fi": "Wi-Fi",
       "wifi": "Wi-Fi",
-      "wifi-off": "Wi-Fi is off",
-      "wifi-on": "Wi-Fi is on",
-      "wired-connection": "Wired connection"
+      "wired": "Wired"
     },
     "notifications": {
       "clear-all": "Clear all notifications",

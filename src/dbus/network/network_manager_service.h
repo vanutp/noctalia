@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -21,6 +22,10 @@ namespace sdbus {
 }
 
 class NetworkManagerService : public INetworkService {
+  struct CompetingLink;
+  struct PromotionScan;
+  struct RouteMetrics;
+
 public:
   using ChangeCallback = std::function<void(const NetworkState&, NetworkChangeOrigin)>;
 
@@ -41,6 +46,9 @@ public:
   [[nodiscard]] const std::vector<AccessPointInfo>& accessPoints() const noexcept override { return m_accessPoints; }
   [[nodiscard]] const std::vector<VpnConnectionInfo>& vpnConnections() const noexcept override {
     return m_vpnConnections;
+  }
+  [[nodiscard]] const std::vector<WiredConnectionInfo>& wiredConnections() const noexcept override {
+    return m_wiredConnections;
   }
 
   // Trigger a Wi-Fi scan on every wifi device. Results arrive via PropertiesChanged.
@@ -68,11 +76,24 @@ public:
   bool activateCellularConnection() override;
   bool deactivateCellularConnection() override;
 
+  // Activate / deactivate one saved wired profile. Deactivation goes through
+  // Device.Disconnect so autoconnect does not immediately bring it back up.
+  bool activateWiredConnection(const WiredConnectionInfo& wired) override;
+  bool deactivateWiredConnection(const WiredConnectionInfo& wired) override;
+
   // Enable / disable the Wi-Fi radio.
   void setWirelessEnabled(bool enabled, WirelessEnabledCompletion onComplete = {}) override;
 
   // Disconnect the active physical connection.
   void disconnect() override;
+
+  // Disconnect the wifi device this access point belongs to, leaving any other
+  // link (wired, VPN) untouched.
+  bool disconnectAccessPoint(const AccessPointInfo& ap) override;
+
+  // Hand the default route to an already-connected link.
+  bool makePrimary(const AccessPointInfo& ap) override;
+  bool makePrimary(const WiredConnectionInfo& wired) override;
 
   // Delete every saved connection whose 802-11-wireless SSID matches.
   void forgetSsid(const std::string& ssid) override;
@@ -87,11 +108,27 @@ private:
   // connections, the derived flags those profiles share with cellular
   // (m_anyVpnConnected, m_anyCellularActive).
   void refreshVpnAndActiveConnections(std::function<void()> onComplete);
+  void refreshLinkDetails(std::function<void()> onComplete);
   void reconcileVpnActiveWatchers(const std::set<std::string>& activePaths);
   void finishSavedConnections(
-      std::vector<std::string>& ssids, std::vector<std::string>& wiredConnectionPaths,
+      std::vector<std::string>& ssids, std::vector<WiredConnectionInfo>& wiredConnections,
       std::vector<std::string>& cellularConnectionPaths, std::function<void()> onComplete
   );
+  void disconnectWiredActiveConnection(const std::string& activePath, const std::string& devicePath);
+  bool makeProfilePrimary(const std::string& profilePath, const std::string& devicePath);
+  // Every active non-tunnel link except the excluded profile, with the metrics its
+  // IPv4 and IPv6 default routes currently hold, so a promotion can undercut the
+  // real winner of each family instead of a guess.
+  void
+  collectCompetingLinks(const std::string& excludeProfilePath, std::function<void(std::vector<CompetingLink>)> done);
+  void applyRouteMetric(
+      const std::string& profilePath, const std::string& devicePath, const RouteMetrics& metrics,
+      std::function<void()> onDone
+  );
+  // Re-applying a profile drops and rebuilds its link, so its address only exists
+  // once activation finishes. Watch for that and refresh, or the row keeps showing
+  // the empty mid-activation snapshot until something else forces a re-read.
+  void watchReactivation(const std::string& activePath);
   void finishRefreshAccessPoints(std::vector<AccessPointInfo>& aps, std::function<void()> onComplete);
   bool addAndActivateAccessPoint(
       const AccessPointInfo& ap, const std::optional<std::string>& psk,
@@ -151,8 +188,22 @@ private:
   std::vector<AccessPointInfo> m_accessPoints;
   std::vector<VpnConnectionInfo> m_vpnConnections;
   std::vector<std::string> m_savedSsids;
-  std::vector<std::string> m_savedWiredConnectionPaths;
+  std::vector<WiredConnectionInfo> m_wiredConnections;
   std::vector<std::string> m_savedCellularConnectionPaths;
+  // Profile paths of every connection currently activating or activated, refreshed
+  // by the VPN active-connection scan and applied to m_wiredConnections on emit.
+  std::set<std::string> m_activeProfilePaths;
+  // Wired profiles a present ethernet device could activate, and the address every
+  // active link holds, keyed both by profile (for wired rows) and by device (for
+  // access points). All joined into the published lists on emit.
+  std::set<std::string> m_wiredAvailableProfilePaths;
+  std::map<std::string, std::string> m_ipv4ByProfilePath;
+  std::map<std::string, std::string> m_ipv4ByDevicePath;
+  std::map<std::string, std::string> m_devicePathByProfilePath;
+  std::map<std::string, std::string> m_profilePathByDevicePath;
+  // Watcher for the link a promotion re-activated. Replaced only from async reply
+  // context, never torn down inside its own handler.
+  std::unique_ptr<sdbus::IProxy> m_reactivationWatcher;
   std::unordered_map<std::string, std::unique_ptr<PendingAccessPointActivation>> m_pendingApActivations;
   // Finished activations whose proxy may still be executing its own handler;
   // freed at the next refresh completion (an async reply context).

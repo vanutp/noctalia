@@ -29,6 +29,8 @@ public:
   [[nodiscard]] virtual bool hasStateSnapshot() const noexcept = 0;
   [[nodiscard]] virtual const std::vector<AccessPointInfo>& accessPoints() const noexcept = 0;
   [[nodiscard]] virtual const std::vector<VpnConnectionInfo>& vpnConnections() const noexcept = 0;
+  // Saved wired profiles. Backends without wired support return an empty list.
+  [[nodiscard]] virtual const std::vector<WiredConnectionInfo>& wiredConnections() const noexcept;
 
   virtual void requestScan() = 0;
   virtual bool activateAccessPoint(const AccessPointInfo& ap) = 0;
@@ -46,6 +48,8 @@ public:
   virtual bool deactivateVpnConnection(const VpnConnectionInfo& vpn) = 0;
   [[nodiscard]] virtual bool canActivateWiredConnection() const noexcept { return false; }
   virtual bool activateWiredConnection() { return false; }
+  virtual bool activateWiredConnection(const WiredConnectionInfo& /*wired*/) { return false; }
+  virtual bool deactivateWiredConnection(const WiredConnectionInfo& /*wired*/) { return false; }
   // GNOME-style mobile-data control over a saved cellular (gsm) connection.
   // Activation brings up the modem and the data connection; deactivation drops
   // the data connection but leaves the modem registered. Only backends that own
@@ -54,7 +58,16 @@ public:
   virtual bool activateCellularConnection() { return false; }
   virtual bool deactivateCellularConnection() { return false; }
   virtual void setWirelessEnabled(bool enabled, WirelessEnabledCompletion onComplete = {}) = 0;
+  // Disconnect the primary link, whichever it is.
   virtual void disconnect() = 0;
+  // Disconnect the device carrying this access point. disconnect() would hit the
+  // primary link instead, which is the wired one when both are up.
+  virtual bool disconnectAccessPoint(const AccessPointInfo& /*ap*/) { return false; }
+
+  // Give an already-connected link the default route. NetworkManager picks the
+  // primary by route metric, so this lowers the link's metric and re-applies it.
+  virtual bool makePrimary(const AccessPointInfo& /*ap*/) { return false; }
+  virtual bool makePrimary(const WiredConnectionInfo& /*wired*/) { return false; }
   virtual void forgetSsid(const std::string& ssid) = 0;
   [[nodiscard]] virtual bool hasSavedConnection(const std::string& ssid) const = 0;
   void registerIpc(IpcService& ipc, WirelessFeedbackCallback wirelessFeedback = {});

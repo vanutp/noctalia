@@ -7,7 +7,7 @@
 #include "dbus/network/network_display.h"
 #include "i18n/i18n.h"
 #include "render/core/renderer.h"
-#include "render/scene/input_area.h"
+#include "shell/control_center/tabs/network_row.h"
 #include "shell/panel/panel_manager.h"
 #include "ui/builders.h"
 #include "ui/palette.h"
@@ -17,6 +17,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -104,30 +105,11 @@ namespace {
     return {};
   }
 
-  std::string currentTitle(const NetworkState& s, const CellularModemInfo* modem) {
-    if (s.kind == NetworkConnectivity::Wireless && s.connected && !s.ssid.empty()) {
-      return s.ssid;
-    }
-    if (s.kind == NetworkConnectivity::Wired && s.connected) {
-      return s.interfaceName.empty() ? i18n::tr("control-center.network.wired-connection") : s.interfaceName;
-    }
-    if (s.kind == NetworkConnectivity::Cellular && s.connected) {
-      if (modem != nullptr && !modem->operatorName.empty()) {
-        return modem->operatorName;
-      }
-      return i18n::tr("control-center.network.cellular-connection");
-    }
-    return i18n::tr("control-center.network.not-connected");
-  }
-
-  std::string currentDetail(const NetworkState& s, const std::string& externalIp, const CellularModemInfo* modem) {
-    if (!s.connected) {
-      if (s.kind == NetworkConnectivity::Cellular && modem != nullptr) {
-        return cellularStateText(modem->state);
-      }
-      return s.wirelessEnabled ? i18n::tr("control-center.network.wifi-on")
-                               : i18n::tr("control-center.network.wifi-off");
-    }
+  // Subtitle of a connected row: its own address, plus the WAN address when this
+  // link is the one carrying the default route — the WAN address is a property of
+  // that route, so it would be a lie under any other link.
+  std::string
+  connectedDetail(const std::string& ipv4, std::uint32_t frequencyMhz, bool isPrimary, const std::string& externalIp) {
     std::string out;
     const auto append = [&out](std::string_view part) {
       if (!out.empty()) {
@@ -135,33 +117,17 @@ namespace {
       }
       out += part;
     };
-    if (!s.ipv4.empty()) {
-      append(s.ipv4);
+    if (!ipv4.empty()) {
+      append(ipv4);
     }
-    if (s.kind == NetworkConnectivity::Wireless) {
-      if (s.signalStrength > 0) {
-        append(std::to_string(static_cast<int>(s.signalStrength)) + "%");
-      }
-      if (const char* band = network_display::wifiFrequencyBandLabel(s.frequencyMhz); band != nullptr) {
-        append(band);
-      }
+    if (const char* band = network_display::wifiFrequencyBandLabel(frequencyMhz); band != nullptr) {
+      append(band);
     }
-    if (s.kind == NetworkConnectivity::Cellular && modem != nullptr) {
-      if (!out.empty()) {
-        out += "  •  ";
-      }
-      out += std::to_string(static_cast<int>(modem->signalQuality)) + "%";
-      if (const char* tech = cellularAccessTechnologyName(modem->accessTechnologies); tech[0] != '\0') {
-        out += "  •  ";
-        out += tech;
-      }
-    }
-    if (!externalIp.empty()) {
+    if (isPrimary && !externalIp.empty()) {
       append(i18n::tr("control-center.network.external-ip", "ip", externalIp));
     }
     return out;
   }
-
   const char* cellularGlyphFor(const CellularModemInfo& modem) {
     return modem.enabled() ? network_display::cellularGlyphForSignal(modem.signalQuality)
                            : network_display::cellularOffGlyph();
@@ -235,22 +201,16 @@ namespace {
 
 } // namespace
 
-class AccessPointRow : public Flex {
+class AccessPointRow : public NetworkRowBase {
 public:
   AccessPointRow(
-      float scale, AccessPointInfo ap, bool saved, std::function<void(const AccessPointInfo&)> onActivate,
-      std::function<void(const AccessPointInfo&)> onForget
+      float scale, AccessPointInfo ap, bool saved, bool primary, bool showPrimaryBadge,
+      std::function<void(const AccessPointInfo&)> onActivate, std::function<void(const AccessPointInfo&)> onForget,
+      std::function<void()> onDisconnect, std::function<void()> onMakePrimary
   )
-      : m_ap(std::move(ap)), m_onActivate(std::move(onActivate)), m_onForget(std::move(onForget)) {
-    setDirection(FlexDirection::Horizontal);
-    setAlign(FlexAlign::Center);
-    setGap(Style::spaceSm * scale);
-    setPadding(Style::spaceSm * scale, Style::spaceMd * scale);
-    setMinHeight(kRowMinHeight * scale);
-    setRadius(Style::scaledRadiusMd(scale));
-    setFill(colorSpecFromRole(ColorRole::Surface));
-    clearBorder();
-
+      : NetworkRowBase(scale, primary), m_ap(std::move(ap)), m_onActivate(std::move(onActivate)),
+        m_onForget(std::move(onForget)), m_onDisconnect(std::move(onDisconnect)),
+        m_onMakePrimary(std::move(onMakePrimary)) {
     addChild(
         ui::glyph({
             .out = &m_signalGlyph,
@@ -260,16 +220,11 @@ public:
         })
     );
 
-    addChild(
-        ui::label({
-            .out = &m_title,
-            .text = m_ap.ssid,
-            .fontSize = Style::fontSizeBody * scale,
-            .fontWeight = m_ap.active ? FontWeight::Bold : FontWeight::Normal,
-            .color = colorSpecFromRole(ColorRole::OnSurface),
-            .flexGrow = 1.0F,
-        })
-    );
+    addTitleColumn(scale, m_ap.ssid, m_ap.active);
+
+    if (showPrimaryBadge) {
+      addPrimaryBadge(scale);
+    }
 
     if (m_ap.secured) {
       addChild(
@@ -290,17 +245,25 @@ public:
         })
     );
 
+    // A row with no action still reserves the slot rather than collapsing it, so
+    // the signal percent stays aligned down the whole list.
     const float actionOpacity = (m_ap.active || saved) ? 1.0F : 0.0F;
+    Button* actionButton = nullptr;
     auto action = ui::button({
-        .out = &m_actionButton,
+        .out = &actionButton,
         .glyphSize = Style::baseGlyphSize * scale,
-        .variant = ButtonVariant::Ghost,
+        .variant = m_ap.active ? ButtonVariant::Destructive : ButtonVariant::Ghost,
         .padding = Style::spaceXs * scale,
         .radius = Style::scaledRadiusSm(scale),
         .opacity = actionOpacity,
     });
     if (m_ap.active) {
-      action->setGlyph("check");
+      action->setGlyph("plug-off");
+      action->setOnClick([this]() {
+        if (m_onDisconnect) {
+          m_onDisconnect();
+        }
+      });
     } else if (saved) {
       action->setGlyph("trash");
       action->setOnClick([this]() {
@@ -311,43 +274,8 @@ public:
     }
     addChild(std::move(action));
 
-    auto area = ui::inputArea({});
-    area->setPropagateEvents(true);
-    area->setOnEnter([this](const InputArea::PointerData& /*data*/) { applyState(); });
-    area->setOnLeave([this]() { applyState(); });
-    area->setOnPress([this](const InputArea::PointerData& /*data*/) { applyState(); });
-    area->setOnClick([this](const InputArea::PointerData& /*data*/) {
-      if (m_onActivate) {
-        m_onActivate(m_ap);
-      }
-    });
-    m_inputArea = static_cast<InputArea*>(addChild(std::move(area)));
-
-    applyState();
-    m_paletteConn = paletteChanged().connect([this] { applyState(); });
+    finishRow(actionButton);
   }
-
-  void doLayout(Renderer& renderer) override {
-    if (m_inputArea == nullptr) {
-      return;
-    }
-    m_inputArea->setVisible(false);
-    Flex::doLayout(renderer);
-    m_inputArea->setVisible(true);
-    m_inputArea->setPosition(0.0F, 0.0F);
-    m_inputArea->setSize(width(), height());
-    if (m_actionButton != nullptr) {
-      const float areaWidth = std::max(0.0F, m_actionButton->x() - gap());
-      m_inputArea->setSize(areaWidth, height());
-    }
-    applyState();
-  }
-
-  LayoutSize doMeasure(Renderer& renderer, const LayoutConstraints& constraints) override {
-    return measureByLayout(renderer, constraints);
-  }
-
-  void doArrange(Renderer& renderer, const LayoutRect& rect) override { arrangeByLayout(renderer, rect); }
 
   [[nodiscard]] const std::string& ssid() const noexcept { return m_ap.ssid; }
 
@@ -367,37 +295,27 @@ public:
   }
 
 private:
-  void applyState() {
-    const bool hov = m_inputArea != nullptr && m_inputArea->hovered();
-    const bool pressed = m_inputArea != nullptr && m_inputArea->pressed();
-    if (pressed) {
-      setFill(colorSpecFromRole(ColorRole::Primary));
-      setBorder(colorSpecFromRole(ColorRole::Primary), Style::borderWidth);
-      if (m_title != nullptr) {
-        m_title->setColor(colorSpecFromRole(ColorRole::OnPrimary));
+  // A connected row is promoted to primary rather than torn down; disconnecting
+  // stayed on the button.
+  void onRowClicked() override {
+    if (m_ap.active) {
+      if (m_onMakePrimary) {
+        m_onMakePrimary();
       }
-    } else {
-      setFill(colorSpecFromRole(ColorRole::Surface));
-      if (hov) {
-        setBorder(colorSpecFromRole(ColorRole::Hover), Style::borderWidth);
-      } else {
-        clearBorder();
-      }
-      if (m_title != nullptr) {
-        m_title->setColor(colorSpecFromRole(ColorRole::OnSurface));
-      }
+      return;
+    }
+    if (m_onActivate) {
+      m_onActivate(m_ap);
     }
   }
 
   AccessPointInfo m_ap;
   std::function<void(const AccessPointInfo&)> m_onActivate;
   std::function<void(const AccessPointInfo&)> m_onForget;
-  Label* m_title = nullptr;
-  Button* m_actionButton = nullptr;
-  InputArea* m_inputArea = nullptr;
+  std::function<void()> m_onDisconnect;
+  std::function<void()> m_onMakePrimary;
   Glyph* m_signalGlyph = nullptr;
   Label* m_signalValue = nullptr;
-  Signal<>::ScopedConnection m_paletteConn;
 };
 
 // Informational modem row: signal glyph, operator/modem name, and live status
@@ -493,52 +411,6 @@ std::unique_ptr<Flex> NetworkTab::create() {
       .align = FlexAlign::Stretch,
       .gap = Style::spaceMd * scale,
   });
-
-  auto currentCard = ui::column({
-      .out = &m_currentCard,
-      .configure = [scale, opacity = panelCardOpacity()](Flex& card) { applySectionCardStyle(card, scale, opacity); },
-  });
-  addTitle(*currentCard, i18n::tr("control-center.network.current-connection"), scale);
-
-  auto connRow = ui::row(
-      {.out = &m_currentRow, .align = FlexAlign::Center, .gap = Style::spaceSm * scale},
-      ui::label({
-          .out = &m_currentTitle,
-          .fontSize = Style::fontSizeBody * scale,
-          .fontWeight = FontWeight::Bold,
-          .color = colorSpecFromRole(ColorRole::OnSurface),
-      }),
-      ui::label({
-          .out = &m_currentDetail,
-          .fontSize = Style::fontSizeCaption * scale,
-          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-          .flexGrow = 1.0F,
-      }),
-      ui::button({
-          .out = &m_disconnectButton,
-          .glyph = "plug-off",
-          .glyphSize = Style::baseGlyphSize * scale,
-          .variant = ButtonVariant::Destructive,
-          .padding = Style::spaceXs * scale,
-          .radius = Style::scaledRadiusSm(scale),
-          .onClick = [this]() {
-            if (m_network == nullptr || m_actionPending) {
-              return;
-            }
-            const bool wasConnected = m_network->state().connected;
-            if (wasConnected) {
-              m_network->disconnect();
-            } else if (!m_network->activateWiredConnection()) {
-              return;
-            }
-            beginPendingAction(wasConnected);
-            PanelManager::instance().refresh();
-          },
-      })
-  );
-  currentCard->addChild(std::move(connRow));
-
-  tab->addChild(std::move(currentCard));
 
   auto passwordCard = ui::column({
       .out = &m_passwordCard,
@@ -760,7 +632,7 @@ void NetworkTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeig
   rebuildApList(renderer);
   syncApRows();
   syncCellularCard();
-  syncCurrentCard();
+  syncLiveState(renderer);
   m_rootLayout->layout(renderer);
 }
 
@@ -773,14 +645,11 @@ void NetworkTab::doUpdate(Renderer& renderer) {
   if (listChanged && m_list != nullptr) {
     m_list->layout(renderer);
   }
-  syncCurrentCard();
+  syncLiveState(renderer);
 }
 
 void NetworkTab::onClose() {
   m_rootLayout = nullptr;
-  m_currentCard = nullptr;
-  m_currentTitle = nullptr;
-  m_currentDetail = nullptr;
   m_passwordCard = nullptr;
   m_passwordTitle = nullptr;
   m_passwordInput = nullptr;
@@ -799,19 +668,16 @@ void NetworkTab::onClose() {
   m_rescanButton = nullptr;
   m_wifiToggle = nullptr;
   m_scanSpinner = nullptr;
-  m_currentRow = nullptr;
-  m_disconnectButton = nullptr;
   m_cellularToggle = nullptr;
   m_cellularRows.clear();
   m_cellularTogglePending = false;
   m_cellularTogglePendingTimer.stop();
   m_apRows.clear();
+  m_wiredRows.clear();
   m_lastStructureKey.clear();
   m_lastListWidth = -1.0F;
   m_pendingAccessPoint.reset();
   m_active = false;
-  m_actionPending = false;
-  m_actionPendingTimer.stop();
   m_wifiTogglePending = false;
   m_wifiToggleWriteComplete = false;
   m_wifiToggleTargetObserved = false;
@@ -993,30 +859,40 @@ void NetworkTab::clearPasswordPrompt() {
 
 bool NetworkTab::networkAvailable() const noexcept { return m_network != nullptr && m_network->available(); }
 
-void NetworkTab::syncCurrentCard() {
-  if (m_currentTitle == nullptr || m_currentDetail == nullptr) {
-    return;
+// Physical links that are up right now. The promote affordance and its badge only
+// make sense once there is more than one, since a lone link is always primary.
+int NetworkTab::activeLinkCount() const {
+  if (m_network == nullptr) {
+    return 0;
   }
-  if (!networkAvailable()) {
-    m_currentTitle->setText(i18n::tr("control-center.network.unavailable-title"));
-    m_currentDetail->setText(i18n::tr("control-center.network.unavailable-detail"));
-    if (m_currentRow != nullptr) {
-      m_currentRow->setVisible(false);
+  int count = 0;
+  for (const auto& ap : m_network->accessPoints()) {
+    if (ap.active) {
+      ++count;
+      break;
     }
-    return;
   }
-  if (m_currentRow != nullptr) {
-    m_currentRow->setVisible(true);
+  for (const auto& wired : m_network->wiredConnections()) {
+    if (wired.active) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+bool NetworkTab::isPrimaryDevice(const std::string& devicePath) const {
+  if (m_network == nullptr || devicePath.empty()) {
+    return false;
+  }
+  const std::string& primary = m_network->state().primaryDevicePath;
+  return !primary.empty() && primary == devicePath;
+}
+
+void NetworkTab::syncLiveState(Renderer& renderer) {
+  if (!networkAvailable()) {
+    return;
   }
   const NetworkState& s = m_network->state();
-  if (m_actionPending) {
-    const bool flipped = s.connected != m_actionPendingConnected;
-    const bool timedOut = std::chrono::steady_clock::now() - m_actionPendingSince > kActionPendingTimeout;
-    if (flipped || timedOut) {
-      m_actionPending = false;
-      m_actionPendingTimer.stop();
-    }
-  }
   if (m_wifiTogglePending) {
     if (s.wirelessEnabled == m_wifiToggleTarget) {
       m_wifiToggleTargetObserved = true;
@@ -1029,15 +905,38 @@ void NetworkTab::syncCurrentCard() {
   }
   static const std::string kNoExternalIp;
   const std::string& externalIp = m_externalIpService != nullptr ? m_externalIpService->externalIp() : kNoExternalIp;
-  const CellularModemInfo* modem = m_modem != nullptr ? m_modem->primaryModem() : nullptr;
-  m_currentTitle->setText(currentTitle(s, modem));
-  m_currentDetail->setText(currentDetail(s, externalIp, modem));
-  if (m_disconnectButton != nullptr) {
-    const bool canReconnectWired = !s.connected && m_network->canActivateWiredConnection();
-    m_disconnectButton->setVisible(s.connected || canReconnectWired || m_actionPending);
-    m_disconnectButton->setGlyph(s.connected ? "plug-off" : "plug");
-    m_disconnectButton->setVariant(s.connected ? ButtonVariant::Destructive : ButtonVariant::Default);
-    m_disconnectButton->setEnabled(!m_actionPending);
+  // The addresses arrive after the rows are built (DHCP, then the WAN lookup), so
+  // showing them adds a line and the list has to be laid out again.
+  // Addresses are pushed per row rather than into one remembered "active" row:
+  // two NICs (or two radios) can be up at once, and each carries its own. A row
+  // that is not connected gets an empty detail, which hides the line.
+  bool detailChanged = false;
+  for (const auto& ap : m_network->accessPoints()) {
+    const auto it = m_apRows.find(ap.ssid);
+    if (it == m_apRows.end()) {
+      continue;
+    }
+    // The address comes from the link's own device, so it stays right when some
+    // other link is the primary one. The WAN address belongs to whichever link
+    // holds the default route, so it is asked per device too.
+    // The band comes from the state's associated BSS, so it only describes the
+    // link that is actually up.
+    const std::uint32_t frequencyMhz = s.kind == NetworkConnectivity::Wireless && s.connected ? s.frequencyMhz : 0;
+    const std::string detail =
+        ap.active ? connectedDetail(ap.ipv4, frequencyMhz, isPrimaryDevice(ap.devicePath), externalIp) : std::string{};
+    detailChanged = it->second->setDetail(detail) || detailChanged;
+  }
+  for (const auto& wired : m_network->wiredConnections()) {
+    const auto it = m_wiredRows.find(wired.path);
+    if (it == m_wiredRows.end()) {
+      continue;
+    }
+    const std::string detail =
+        wired.active ? connectedDetail(wired.ipv4, 0, isPrimaryDevice(wired.devicePath), externalIp) : std::string{};
+    detailChanged = it->second->setDetail(detail) || detailChanged;
+  }
+  if (detailChanged && m_list != nullptr) {
+    m_list->layout(renderer);
   }
   if (m_wifiToggle != nullptr) {
     m_wifiToggle->setChecked(m_wifiTogglePending ? m_wifiToggleTarget : s.wirelessEnabled);
@@ -1050,19 +949,6 @@ void NetworkTab::syncCurrentCard() {
     } else if (!s.scanning && m_scanSpinner->spinning()) {
       m_scanSpinner->stop();
     }
-  }
-}
-
-void NetworkTab::beginPendingAction(bool wasConnected) {
-  m_actionPending = true;
-  m_actionPendingConnected = wasConnected;
-  m_actionPendingSince = std::chrono::steady_clock::now();
-  m_actionPendingTimer.start(kActionPendingTimeout + std::chrono::milliseconds(50), []() {
-    PanelManager::instance().requestUpdateOnly();
-    PanelManager::instance().requestRedraw();
-  });
-  if (m_disconnectButton != nullptr) {
-    m_disconnectButton->setEnabled(false);
   }
 }
 
@@ -1101,8 +987,16 @@ void NetworkTab::handleWirelessEnabledCompletion(std::uint64_t generation, bool 
 // each carries, and how each activates. The signal strength is absent by design —
 // it refreshes in place through syncApRows(), so a scan update no longer tears the
 // list down. Access points arrive sorted, so a change in row order changes the key.
-std::string NetworkTab::structureKey(const std::vector<AccessPointInfo>& aps) const {
+std::string
+NetworkTab::structureKey(const std::vector<AccessPointInfo>& aps, const std::vector<WiredConnectionInfo>& wired) const {
   std::string key;
+  // Which link is primary and how many are up decide the badge and whether a row
+  // is clickable at all, so both belong to the structure.
+  key += "primary:";
+  key += m_network != nullptr ? m_network->state().primaryDevicePath : std::string{};
+  key += "\nactive:";
+  key += std::to_string(activeLinkCount());
+  key.push_back('\n');
   for (const auto& ap : aps) {
     key += ap.ssid;
     key.push_back(':');
@@ -1113,6 +1007,15 @@ std::string NetworkTab::structureKey(const std::vector<AccessPointInfo>& aps) co
     key += ap.active ? '1' : '0';
     key.push_back(':');
     key += (m_network != nullptr && m_network->hasSavedConnection(ap.ssid)) ? '1' : '0';
+    key.push_back('\n');
+  }
+  key += "---\n";
+  for (const auto& conn : wired) {
+    key += conn.path;
+    key.push_back(':');
+    key += conn.name;
+    key.push_back(':');
+    key += conn.active ? '1' : '0';
     key.push_back('\n');
   }
   const bool wirelessEnabled = m_network != nullptr && m_network->state().wirelessEnabled;
@@ -1151,7 +1054,9 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
   if (m_network != nullptr) {
     aps = sortedAccessPoints(m_network->accessPoints());
   }
-  const std::string nextStructure = structureKey(aps);
+  static const std::vector<WiredConnectionInfo> kNoWired;
+  const auto& wired = m_network != nullptr ? m_network->wiredConnections() : kNoWired;
+  const std::string nextStructure = structureKey(aps, wired);
   if (listWidth == m_lastListWidth && nextStructure == m_lastStructureKey) {
     return;
   }
@@ -1197,8 +1102,11 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
         }
         for (const auto& ap : bucket) {
           const bool saved = m_network != nullptr && m_network->hasSavedConnection(ap.ssid);
+          // Every access point on a radio shares its device path, so the active
+          // one has to be singled out or the whole list would go inert.
+          const bool primary = ap.active && isPrimaryDevice(ap.devicePath);
           auto row = std::make_unique<AccessPointRow>(
-              scale, ap, saved,
+              scale, ap, saved, primary, primary && activeLinkCount() > 1,
               [this](const AccessPointInfo& clicked) {
                 if (clicked.active || m_network == nullptr) {
                   return;
@@ -1213,6 +1121,18 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
               [this](const AccessPointInfo& clicked) {
                 if (m_network != nullptr) {
                   m_network->forgetSsid(clicked.ssid);
+                }
+                PanelManager::instance().refresh();
+              },
+              [this, ap]() {
+                if (m_network != nullptr) {
+                  m_network->disconnectAccessPoint(ap);
+                }
+                PanelManager::instance().refresh();
+              },
+              [this, ap]() {
+                if (m_network != nullptr) {
+                  m_network->makePrimary(ap);
                 }
                 PanelManager::instance().refresh();
               }
@@ -1250,21 +1170,69 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
   m_cellularToggle = nullptr;
   m_cellularRows.clear();
   m_apRows.clear();
+  m_wiredRows.clear();
 
   while (!m_list->children().empty()) {
     m_list->removeChild(m_list->children().front().get());
   }
 
+  const float opacity = panelCardOpacity();
   if (!networkAvailable()) {
-    m_list->addChild(
-        ui::label({
-            .text = i18n::tr("control-center.network.unavailable-title"),
-            .fontSize = Style::fontSizeBody * scale,
-            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-        })
-    );
+    auto unavailableCard = ui::column({
+        .configure = [scale, opacity](Flex& card) { applySectionCardStyle(card, scale, opacity); },
+    });
+    addTitle(*unavailableCard, i18n::tr("control-center.network.unavailable-title"), scale);
+    addBody(*unavailableCard, i18n::tr("control-center.network.unavailable-detail"), scale);
+    m_list->addChild(std::move(unavailableCard));
   } else {
-    const float opacity = panelCardOpacity();
+    // Wired profiles exist only on backends that report them, so the card is
+    // absent entirely on a machine with no ethernet connection saved.
+    if (!wired.empty()) {
+      auto wiredCard = ui::column({
+          .configure = [scale, opacity](Flex& card) { applySectionCardStyle(card, scale, opacity); },
+      });
+      wiredCard->addChild(makeCardHeaderRow(i18n::tr("control-center.network.wired"), scale));
+
+      for (const auto& conn : wired) {
+        const bool primary = conn.active && isPrimaryDevice(conn.devicePath);
+        auto row = std::make_unique<ConnectionRow>(
+            renderer, scale,
+            ConnectionRowSpec{
+                .name = conn.name,
+                .glyph = conn.virtualLink ? "hierarchy-2" : "ethernet",
+                .active = conn.active,
+                .onActivate =
+                    [this, conn]() {
+                      if (m_network != nullptr) {
+                        m_network->activateWiredConnection(conn);
+                      }
+                      PanelManager::instance().refresh();
+                    },
+                .onDeactivate =
+                    [this, conn]() {
+                      if (m_network != nullptr) {
+                        m_network->deactivateWiredConnection(conn);
+                      }
+                      PanelManager::instance().refresh();
+                    },
+                .showPrimaryBadge = primary && activeLinkCount() > 1,
+                .primary = primary,
+                .onMakePrimary =
+                    [this, conn]() {
+                      if (m_network != nullptr) {
+                        m_network->makePrimary(conn);
+                      }
+                      PanelManager::instance().refresh();
+                    },
+            }
+        );
+        auto* rowPtr = row.get();
+        wiredCard->addChild(std::move(row));
+        m_wiredRows.emplace(conn.path, rowPtr);
+      }
+
+      m_list->addChild(std::move(wiredCard));
+    }
 
     if (m_modem != nullptr && !m_modem->modems().empty()) {
       auto cellularCard = ui::column({
@@ -1339,7 +1307,7 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
       m_list->addChild(std::move(wifiCard));
 
       // Live state (spinner visibility/animation, toggle checked) is owned by
-      // syncCurrentCard(), which runs every frame after the card is attached.
+      // syncLiveState(), which runs every frame after the card is attached.
       // rebuildApList() builds structure only and must not drive animations.
     }
   }

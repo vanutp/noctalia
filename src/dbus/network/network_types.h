@@ -9,6 +9,7 @@ struct AccessPointInfo {
   std::string path;       // Backend access point object path.
   std::string devicePath; // Backend device object path this AP belongs to.
   std::string ssid;
+  std::string ipv4;          // address of the device carrying this AP while connected
   std::uint8_t strength = 0; // 0..100
   bool secured = false;
   // How the AP wants to be authenticated, derived from its RSN flags. Drives both
@@ -36,6 +37,17 @@ struct VpnConnectionInfo {
   bool operator==(const VpnConnectionInfo&) const = default;
 };
 
+struct WiredConnectionInfo {
+  std::string path;       // Backend settings connection object path.
+  std::string devicePath; // Device carrying the profile while active; empty otherwise.
+  std::string name;
+  std::string ipv4; // address of the link while active; empty otherwise
+  bool active = false;
+  bool virtualLink = false; // bridge, bond, team or vlan rather than a plain NIC
+
+  bool operator==(const WiredConnectionInfo&) const = default;
+};
+
 enum class NetworkConnectivity {
   Unknown = 0,
   None = 1,
@@ -56,6 +68,7 @@ struct NetworkState {
   std::string ssid;                // Wi-Fi only
   std::string ipv4;                // dotted-quad of first address; empty if none
   std::string interfaceName;       // e.g. "wlan0", "eth0"
+  std::string primaryDevicePath;   // device carrying the default route; empty if none
   std::uint8_t signalStrength = 0; // 0..100, Wi-Fi only
   // Operating frequency of the associated BSS. Wi-Fi only; 0 when the backend
   // does not report one (iwd).

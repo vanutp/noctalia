@@ -41,6 +41,10 @@ public:
   bool deactivateVpnConnection(const VpnConnectionInfo& /*vpn*/) override { return false; }
   void setWirelessEnabled(bool enabled, WirelessEnabledCompletion onComplete = {}) override;
   void disconnect() override;
+  bool disconnectAccessPoint(const AccessPointInfo& /*ap*/) override {
+    disconnect();
+    return true;
+  }
   void forgetSsid(const std::string& ssid) override;
   [[nodiscard]] bool hasSavedConnection(const std::string& ssid) const override;
 
