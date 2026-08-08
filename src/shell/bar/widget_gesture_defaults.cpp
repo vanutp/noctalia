@@ -94,9 +94,10 @@ namespace noctalia::bar {
          {Gesture::ScrollUp, "mic-volume-up"},
          {Gesture::ScrollDown, "mic-volume-down"}}
     };
+    constexpr std::array<GestureBinding, 1> kVpn{{{Gesture::Left, "panel-toggle control-center vpn"}}};
     constexpr std::array<GestureBinding, 1> kWeather{{{Gesture::Left, "panel-toggle control-center weather"}}};
 
-    constexpr std::array<TypeDefaults, 23> kTypeDefaults{{
+    constexpr std::array<TypeDefaults, 24> kTypeDefaults{{
         {"battery", kBattery},
         {"bluetooth", kBluetooth},
         {"brightness", kBrightness},
@@ -117,6 +118,7 @@ namespace noctalia::bar {
         {"sysmon", kSysmon},
         {"taskbar", kTaskbar},
         {"theme_mode", kThemeMode},
+        {"vpn", kVpn},
         {"wallpaper", kWallpaper},
         {"weather", kWeather},
         {"workspaces", kWorkspaces},

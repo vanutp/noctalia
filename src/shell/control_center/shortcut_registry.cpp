@@ -19,6 +19,7 @@
 #include "shell/keyboard_layout_label.h"
 #include "shell/panel/panel_manager.h"
 #include "system/gamma_service.h"
+#include "system/tailscale_service.h"
 #include "system/weather_service.h"
 #include "theme/theme_service.h"
 
@@ -71,6 +72,40 @@ namespace {
 
   private:
     INetworkService* m_svc;
+  };
+
+  // A profile is picked in the VPN tab, so the tile reports the tunnel and opens
+  // that tab rather than toggling one of them blindly.
+  class VpnShortcut final : public Shortcut {
+  public:
+    VpnShortcut(INetworkService* network, TailscaleService* tailscale) : m_network(network), m_tailscale(tailscale) {}
+    std::string_view id() const override { return "vpn"; }
+    std::string defaultLabel() const override { return i18n::tr("control-center.shortcuts.vpn"); }
+    std::string displayLabel() const override {
+      if (m_tailscale != nullptr && m_tailscale->exitNodeActive()) {
+        return m_tailscale->activeExitNodeName();
+      }
+      if (m_network != nullptr) {
+        for (const auto& vpn : m_network->vpnConnections()) {
+          if (vpn.active) {
+            return vpn.name;
+          }
+        }
+      }
+      return defaultLabel();
+    }
+    static constexpr std::string_view kIconOn = "shield-lock";
+    std::string_view iconOn() const override { return kIconOn; }
+    std::string_view iconOff() const override { return "shield-off"; }
+    bool active() const override {
+      return (m_network != nullptr && m_network->state().vpnActive)
+          || (m_tailscale != nullptr && m_tailscale->exitNodeActive());
+    }
+    void onClick() override { openTab("vpn"); }
+
+  private:
+    INetworkService* m_network;
+    TailscaleService* m_tailscale;
   };
 
   class BluetoothShortcut final : public Shortcut {
@@ -498,6 +533,11 @@ namespace {
           .type = "wifi",
           .labelKey = "control-center.shortcuts.wifi",
           .icon = WifiShortcut::kIconOn,
+      }),
+      builtinShortcut<VpnShortcut, &ShortcutServices::network, &ShortcutServices::tailscale>({
+          .type = "vpn",
+          .labelKey = "control-center.shortcuts.vpn",
+          .icon = VpnShortcut::kIconOn,
       }),
       builtinShortcut<BluetoothShortcut, &ShortcutServices::bluetooth>({
           .type = "bluetooth",
