@@ -43,6 +43,7 @@ class Node;
 class RovingListNavHost;
 class NetworkSecretAgent;
 class INetworkService;
+class TailscaleService;
 class GammaService;
 class NotificationManager;
 class PipeWireService;
@@ -113,6 +114,7 @@ private:
     Monitor,
     System,
     Network,
+    Vpn,
     Bluetooth,
     Weather,
     Calendar,
@@ -138,6 +140,7 @@ private:
       {TabId::System, "system", "control-center.tabs.system", "activity-heartbeat"},
       {TabId::Power, "power", "control-center.tabs.power", "battery-charging-2"},
       {TabId::Network, "network", "control-center.tabs.network", "wifi"},
+      {TabId::Vpn, "vpn", "control-center.tabs.vpn", "shield-lock"},
       {TabId::Bluetooth, "bluetooth", "control-center.tabs.bluetooth", "bluetooth"},
       {TabId::Weather, "weather", "control-center.tabs.weather", "weather-cloud-sun"},
       {TabId::Calendar, "calendar", "control-center.tabs.calendar", "calendar-event"},
@@ -162,6 +165,8 @@ private:
   [[nodiscard]] int visibleTabOrdinal(TabId tab) const;
   void syncTabVisibility();
   [[nodiscard]] bool isTabFeatureAvailable(TabId tab) const;
+  // The VPN tab is worth a sidebar slot only once something can be connected.
+  [[nodiscard]] bool hasVpnConnections() const;
   [[nodiscard]] bool isTabVisible(TabId tab) const;
   [[nodiscard]] bool isTabShown(TabId tab) const;
   [[nodiscard]] static std::string_view tabKey(TabId tab);
@@ -194,6 +199,8 @@ private:
   TabId m_activeTab = TabId::Home;
   bool m_activeTabForced = false;
   ConfigService* m_config = nullptr;
+  INetworkService* m_network = nullptr;
+  TailscaleService* m_tailscale = nullptr;
   MprisService* m_mpris = nullptr;
   NotificationManager* m_notificationManager = nullptr;
   DependencyService* m_dependencies = nullptr;

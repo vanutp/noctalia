@@ -4,17 +4,20 @@
 #include "config/config_service.h"
 #include "core/deferred_call.h"
 #include "dbus/mpris/mpris_service.h"
+#include "dbus/network/inetwork_service.h"
 #include "i18n/i18n.h"
 #include "notification/notification_manager.h"
 #include "render/core/renderer.h"
 #include "render/scene/input_area.h"
 #include "render/scene/node.h"
 #include "shell/control_center/tabs/screen_time_tab.h"
+#include "shell/control_center/tabs/vpn_tab.h"
 #include "shell/panel/panel_button_style.h"
 #include "shell/panel/panel_manager.h"
 #include "system/dependency_service.h"
 #include "system/easyeffects_service.h"
 #include "system/screen_time_service.h"
+#include "system/tailscale_service.h"
 #include "ui/builders.h"
 #include "ui/controls/roving_list_nav.h"
 #include "ui/controls/scroll_view.h"
@@ -47,6 +50,8 @@ ControlCenterPanel::ControlCenterPanel(const ControlCenterServices& services) {
   m_hasPowerServices = services.upower != nullptr || services.powerProfiles != nullptr;
   WaylandConnection* wayland = services.platform != nullptr ? &services.platform->wayland() : nullptr;
   m_config = services.config;
+  m_network = services.network;
+  m_tailscale = services.tailscale;
   m_mpris = services.mpris;
   m_notificationManager = services.notifications;
   m_dependencies = services.dependencies;
@@ -64,9 +69,8 @@ ControlCenterPanel::ControlCenterPanel(const ControlCenterServices& services) {
   m_tabs[tabIndex(TabId::Notifications)] =
       std::make_unique<NotificationsTab>(services.notifications, services.platform);
   m_tabs[tabIndex(TabId::Network)] =
-      std::make_unique<NetworkTab>(
-          services.network, services.networkSecrets, services.externalIp, services.modem, services.tailscale
-      );
+      std::make_unique<NetworkTab>(services.network, services.networkSecrets, services.externalIp, services.modem);
+  m_tabs[tabIndex(TabId::Vpn)] = std::make_unique<VpnTab>(services.network, services.tailscale);
   m_tabs[tabIndex(TabId::Bluetooth)] = std::make_unique<BluetoothTab>(services.bluetooth, services.bluetoothAgent);
   m_tabs[tabIndex(TabId::Monitor)] = std::make_unique<MonitorTab>(services.brightness, services.config);
   m_tabs[tabIndex(TabId::System)] = std::make_unique<SystemTab>(services.sysmon);
@@ -477,6 +481,11 @@ bool ControlCenterPanel::deferExternalRefresh() const {
 
 bool ControlCenterPanel::deferPointerRelayout() const { return deferExternalRefresh(); }
 
+bool ControlCenterPanel::hasVpnConnections() const {
+  return (m_network != nullptr && !m_network->vpnConnections().empty())
+      || (m_tailscale != nullptr && !m_tailscale->exitNodes().empty());
+}
+
 bool ControlCenterPanel::isTabFeatureAvailable(TabId tab) const {
   if (m_config == nullptr) {
     switch (tab) {
@@ -484,12 +493,16 @@ bool ControlCenterPanel::isTabFeatureAvailable(TabId tab) const {
       return false;
     case TabId::Power:
       return m_hasPowerServices;
+    case TabId::Vpn:
+      return hasVpnConnections();
     default:
       return true;
     }
   }
   const auto& cfg = m_config->config();
   switch (tab) {
+  case TabId::Vpn:
+    return hasVpnConnections();
   case TabId::Weather:
     return cfg.weather.enabled;
   case TabId::ScreenTime:

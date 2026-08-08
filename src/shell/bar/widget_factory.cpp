@@ -65,6 +65,8 @@
 #include "shell/bar/widgets/tray_widget_definition.h"
 #include "shell/bar/widgets/volume_widget.h"
 #include "shell/bar/widgets/volume_widget_definition.h"
+#include "shell/bar/widgets/vpn_widget.h"
+#include "shell/bar/widgets/vpn_widget_definition.h"
 #include "shell/bar/widgets/wallpaper_widget.h"
 #include "shell/bar/widgets/wallpaper_widget_definition.h"
 #include "shell/bar/widgets/weather_widget.h"
@@ -348,6 +350,12 @@ std::unique_ptr<Widget> WidgetFactory::create(
             return createWidget<VolumeWidget>(
                 context.contentScale, f.m_audio, f.m_easyEffects,
                 volumeWidgetDefinition().resolve(context.config, context.settingContext)
+            );
+          }},
+      {"vpn", [](const WidgetFactory& f, const BuiltinWidgetContext& context) {
+            return createWidget<VpnWidget>(
+                context.contentScale, f.m_network, f.m_tailscale, context.output,
+                vpnWidgetDefinition().resolve(context.config, context.settingContext)
             );
           }},
       {"wallpaper", [](const WidgetFactory&, const BuiltinWidgetContext& context) {

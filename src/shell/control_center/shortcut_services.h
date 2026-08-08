@@ -13,6 +13,7 @@ class IpcService;
 class NotificationManager;
 class PipeWireService;
 class PowerProfilesService;
+class TailscaleService;
 class WeatherService;
 class HttpClient;
 class ClipboardService;
@@ -26,6 +27,7 @@ namespace scripting {
 
 struct ShortcutServices {
   INetworkService* network = nullptr;
+  TailscaleService* tailscale = nullptr;
   BluetoothService* bluetooth = nullptr;
   GammaService* nightLight = nullptr;
   noctalia::theme::ThemeService* theme = nullptr;

@@ -354,7 +354,6 @@
       "saved": "Saved",
       "unavailable-detail": "Install and enable NetworkManager, wpa_supplicant, or iwd to manage networks from here.",
       "unavailable-title": "Network service unavailable",
-      "vpns": "VPNs",
       "wi-fi": "Wi-Fi",
       "wifi": "Wi-Fi",
       "wifi-off": "Wi-Fi is off",
@@ -445,6 +444,7 @@
       "screen-time": "Screen Time",
       "session": "Session",
       "system": "System",
+      "vpn": "VPN",
       "wallpaper": "Wallpaper",
       "weather": "Weather",
       "wifi": "Wi-Fi"
@@ -481,6 +481,7 @@
       "power": "Power",
       "screen-time": "Screen Time",
       "system": "System",
+      "vpn": "VPN",
       "weather": "Weather"
     },
     "weather": {
@@ -4314,6 +4315,10 @@
           "description": "Hide the Bluetooth widget when adapter is powered off",
           "label": "Hide When Adapter Off"
         },
+        "hide-when-disconnected": {
+          "description": "Hide the VPN widget when no tunnel is connected",
+          "label": "Hide When Disconnected"
+        },
         "hide-when-empty": {
           "description": "Hide workspace pills when there are no open windows",
           "label": "Hide When Empty",
@@ -4724,6 +4729,7 @@
         "theme-mode": "Theme Mode",
         "tray": "Tray",
         "volume": "Volume",
+        "vpn": "VPN",
         "wallpaper": "Wallpaper",
         "weather": "Weather",
         "workspaces": "Workspaces"

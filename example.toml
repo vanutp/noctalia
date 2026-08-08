@@ -553,6 +553,10 @@ enabled = false
 # show_label     = true
 # show_vpn_label = false             # replace: replaces network label; both: adds VPN label
 
+# [widget.vpn]
+# show_label             = false     # name of the connected tunnel next to the icon
+# hide_when_disconnected = false     # keep the widget only while a tunnel is up
+
 # [widget.volume.effects_profile_glyphs]
 # eq_desktop = "device-speaker"
 

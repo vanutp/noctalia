@@ -81,6 +81,7 @@ struct ControlCenterServices {
   [[nodiscard]] ShortcutServices shortcutServices() const {
     return {
         .network = network,
+        .tailscale = tailscale,
         .bluetooth = bluetooth,
         .nightLight = nightLight,
         .theme = theme,

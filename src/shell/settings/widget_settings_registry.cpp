@@ -36,6 +36,7 @@
 #include "shell/bar/widgets/theme_mode_widget_definition.h"
 #include "shell/bar/widgets/tray_widget_definition.h"
 #include "shell/bar/widgets/volume_widget_definition.h"
+#include "shell/bar/widgets/vpn_widget_definition.h"
 #include "shell/bar/widgets/wallpaper_widget_definition.h"
 #include "shell/bar/widgets/weather_widget_definition.h"
 #include "shell/bar/widgets/workspaces_widget_definition.h"
@@ -167,6 +168,7 @@ namespace settings {
         projectWidgetDefinition<themeModeWidgetDefinition>(),
         projectWidgetDefinition<trayWidgetDefinition>(),
         projectWidgetDefinition<volumeWidgetDefinition>(),
+        projectWidgetDefinition<vpnWidgetDefinition>(),
         projectWidgetDefinition<wallpaperWidgetDefinition>(),
         projectWidgetDefinition<weatherWidgetDefinition>(),
         projectWidgetDefinition<workspacesWidgetDefinition>(),
@@ -257,6 +259,7 @@ namespace settings {
         {.type = "theme_mode", .labelKey = "settings.widgets.types.theme-mode", .glyph = "theme-mode"},
         {.type = "tray", .labelKey = "settings.widgets.types.tray", .glyph = "apps"},
         {.type = "volume", .labelKey = "settings.widgets.types.volume", .glyph = "volume-high"},
+        {.type = "vpn", .labelKey = "settings.widgets.types.vpn", .glyph = "shield-check"},
         {.type = "wallpaper", .labelKey = "settings.widgets.types.wallpaper", .glyph = "wallpaper-selector"},
         {.type = "weather", .labelKey = "settings.widgets.types.weather", .glyph = "weather-cloud"},
         {.type = "workspaces", .labelKey = "settings.widgets.types.workspaces", .glyph = "layout-grid"},

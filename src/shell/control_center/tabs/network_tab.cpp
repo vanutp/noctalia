@@ -1,6 +1,5 @@
 #include "shell/control_center/tabs/network_tab.h"
 
-#include "core/files/resource_paths.h"
 #include "core/ui_phase.h"
 #include "dbus/modem/modem_manager_service.h"
 #include "dbus/network/external_ip_service.h"
@@ -10,7 +9,6 @@
 #include "render/core/renderer.h"
 #include "render/scene/input_area.h"
 #include "shell/panel/panel_manager.h"
-#include "system/tailscale_service.h"
 #include "ui/builders.h"
 #include "ui/palette.h"
 #include "ui/style.h"
@@ -18,7 +16,6 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -403,164 +400,6 @@ private:
   Signal<>::ScopedConnection m_paletteConn;
 };
 
-namespace {
-
-  // Shared by NetworkManager VPN profiles and tailscale exit nodes: a name, a
-  // check mark while active, and one button that connects or disconnects.
-  struct VpnRowSpec {
-    std::string name;
-    std::string iconAsset; // svg under assets/, empty for no leading icon
-    bool active = false;
-    bool enabled = true;
-    std::function<void()> onActivate;
-    std::function<void()> onDeactivate;
-  };
-
-  class VpnConnectionRow : public Flex {
-  public:
-    VpnConnectionRow(Renderer& renderer, float scale, VpnRowSpec spec)
-        : m_active(spec.active), m_enabled(spec.enabled), m_onActivate(std::move(spec.onActivate)),
-          m_onDeactivate(std::move(spec.onDeactivate)) {
-      setDirection(FlexDirection::Horizontal);
-      setAlign(FlexAlign::Center);
-      setGap(Style::spaceSm * scale);
-      setPadding(Style::spaceSm * scale, Style::spaceMd * scale);
-      setMinHeight(kRowMinHeight * scale);
-      setRadius(Style::scaledRadiusMd(scale));
-      setFill(colorSpecFromRole(ColorRole::Surface));
-      clearBorder();
-
-      if (!spec.iconAsset.empty()) {
-        const float iconSize = Style::baseGlyphSize * scale;
-        auto icon = ui::image({.width = iconSize, .height = iconSize});
-        icon->setForegroundTint(colorSpecFromRole(ColorRole::OnSurfaceVariant));
-        icon->setSourceFile(
-            renderer, paths::assetPath(spec.iconAsset).string(), static_cast<int>(std::round(iconSize)), true
-        );
-        addChild(std::move(icon));
-      }
-
-      addChild(
-          ui::label({
-              .out = &m_title,
-              .text = spec.name,
-              .fontSize = Style::fontSizeBody * scale,
-              .fontWeight = m_active ? FontWeight::Bold : FontWeight::Normal,
-              .color = colorSpecFromRole(ColorRole::OnSurface),
-              .flexGrow = 1.0F,
-          })
-      );
-
-      addChild(
-          ui::button({
-              .out = &m_checkButton,
-              .glyph = "check",
-              .glyphSize = Style::baseGlyphSize * scale,
-              .variant = ButtonVariant::Ghost,
-              .padding = Style::spaceXs * scale,
-              .radius = Style::scaledRadiusSm(scale),
-              .opacity = m_active ? 1.0F : 0.0F,
-          })
-      );
-
-      addChild(
-          ui::button({
-              .out = &m_actionButton,
-              .glyph = m_active ? "plug-off" : "plug",
-              .glyphSize = Style::baseGlyphSize * scale,
-              .enabled = m_enabled,
-              .variant = m_active ? ButtonVariant::Destructive : ButtonVariant::Default,
-              .padding = Style::spaceXs * scale,
-              .radius = Style::scaledRadiusSm(scale),
-              .onClick = [this]() { triggerAction(); },
-          })
-      );
-
-      auto area = ui::inputArea({});
-      area->setPropagateEvents(true);
-      area->setOnEnter([this](const InputArea::PointerData& /*data*/) { applyState(); });
-      area->setOnLeave([this]() { applyState(); });
-      area->setOnPress([this](const InputArea::PointerData& /*data*/) { applyState(); });
-      area->setOnClick([this](const InputArea::PointerData& /*data*/) { triggerAction(); });
-      m_inputArea = static_cast<InputArea*>(addChild(std::move(area)));
-
-      applyState();
-      m_paletteConn = paletteChanged().connect([this] { applyState(); });
-    }
-
-    void doLayout(Renderer& renderer) override {
-      if (m_inputArea == nullptr) {
-        return;
-      }
-      m_inputArea->setVisible(false);
-      Flex::doLayout(renderer);
-      m_inputArea->setVisible(true);
-      m_inputArea->setPosition(0.0F, 0.0F);
-      m_inputArea->setSize(width(), height());
-      if (m_actionButton != nullptr) {
-        const float areaWidth = std::max(0.0F, m_actionButton->x() - gap());
-        m_inputArea->setSize(areaWidth, height());
-      }
-      applyState();
-    }
-
-    LayoutSize doMeasure(Renderer& renderer, const LayoutConstraints& constraints) override {
-      return measureByLayout(renderer, constraints);
-    }
-
-    void doArrange(Renderer& renderer, const LayoutRect& rect) override { arrangeByLayout(renderer, rect); }
-
-  private:
-    void triggerAction() {
-      if (!m_enabled) {
-        return;
-      }
-      if (m_active) {
-        if (m_onDeactivate) {
-          m_onDeactivate();
-        }
-      } else {
-        if (m_onActivate) {
-          m_onActivate();
-        }
-      }
-    }
-
-    void applyState() {
-      const bool hov = m_inputArea != nullptr && m_inputArea->hovered();
-      const bool pressed = m_inputArea != nullptr && m_inputArea->pressed();
-      if (pressed) {
-        setFill(colorSpecFromRole(ColorRole::Primary));
-        setBorder(colorSpecFromRole(ColorRole::Primary), Style::borderWidth);
-        if (m_title != nullptr) {
-          m_title->setColor(colorSpecFromRole(ColorRole::OnPrimary));
-        }
-        return;
-      }
-      setFill(colorSpecFromRole(ColorRole::Surface));
-      if (hov) {
-        setBorder(colorSpecFromRole(ColorRole::Hover), Style::borderWidth);
-      } else {
-        clearBorder();
-      }
-      if (m_title != nullptr) {
-        m_title->setColor(colorSpecFromRole(ColorRole::OnSurface));
-      }
-    }
-
-    bool m_active = false;
-    bool m_enabled = true;
-    std::function<void()> m_onActivate;
-    std::function<void()> m_onDeactivate;
-    Label* m_title = nullptr;
-    Button* m_checkButton = nullptr;
-    Button* m_actionButton = nullptr;
-    InputArea* m_inputArea = nullptr;
-    Signal<>::ScopedConnection m_paletteConn;
-  };
-
-} // namespace
-
 // Informational modem row: signal glyph, operator/modem name, and live status
 // detail. It has no actions of its own; the card header carries the enable toggle.
 class CellularRow : public Flex {
@@ -628,11 +467,9 @@ private:
 };
 
 NetworkTab::NetworkTab(
-    INetworkService* network, NetworkSecretAgent* secrets, ExternalIpService* externalIp, ModemManagerService* modem,
-    TailscaleService* tailscale
+    INetworkService* network, NetworkSecretAgent* secrets, ExternalIpService* externalIp, ModemManagerService* modem
 )
-    : m_network(network), m_secrets(secrets), m_externalIpService(externalIp), m_modem(modem),
-      m_tailscale(tailscale) {
+    : m_network(network), m_secrets(secrets), m_externalIpService(externalIp), m_modem(modem) {
   if (m_secrets != nullptr) {
     m_secrets->setRequestCallback([this](const NetworkSecretAgent::SecretRequest& request) {
       showPasswordPrompt(request);
@@ -910,9 +747,6 @@ void NetworkTab::setActive(bool active) {
   }
   if (m_network != nullptr) {
     m_network->requestScan();
-  }
-  if (m_tailscale != nullptr) {
-    m_tailscale->refresh();
   }
 }
 
@@ -1267,10 +1101,7 @@ void NetworkTab::handleWirelessEnabledCompletion(std::uint64_t generation, bool 
 // each carries, and how each activates. The signal strength is absent by design —
 // it refreshes in place through syncApRows(), so a scan update no longer tears the
 // list down. Access points arrive sorted, so a change in row order changes the key.
-std::string NetworkTab::structureKey(
-    const std::vector<AccessPointInfo>& aps, const std::vector<VpnConnectionInfo>& vpns,
-    const std::vector<TailscaleExitNode>& exitNodes
-) const {
+std::string NetworkTab::structureKey(const std::vector<AccessPointInfo>& aps) const {
   std::string key;
   for (const auto& ap : aps) {
     key += ap.ssid;
@@ -1284,35 +1115,10 @@ std::string NetworkTab::structureKey(
     key += (m_network != nullptr && m_network->hasSavedConnection(ap.ssid)) ? '1' : '0';
     key.push_back('\n');
   }
-  key += "---\n";
-  for (const auto& vpn : vpns) {
-    key += vpn.path;
-    key.push_back(':');
-    key += vpn.name;
-    key.push_back(':');
-    key += vpn.active ? '1' : '0';
-    key.push_back('\n');
-  }
-  key += "---\n";
-  for (const auto& node : exitNodes) {
-    key += node.id;
-    key.push_back(':');
-    key += node.name;
-    key.push_back(':');
-    key += node.active ? '1' : '0';
-    key.push_back(':');
-    key += node.online ? '1' : '0';
-    key.push_back('\n');
-  }
-  key += "ts-busy:";
-  key += (m_tailscale != nullptr && m_tailscale->busy()) ? '1' : '0';
-  key.push_back('\n');
   const bool wirelessEnabled = m_network != nullptr && m_network->state().wirelessEnabled;
   const bool scanning = m_network != nullptr && m_network->state().scanning;
   key += "avail:";
   key += networkAvailable() ? '1' : '0';
-  key += "\nvis:";
-  key += m_vpnVisible ? '1' : '0';
   key += "\nwifi:";
   key += wirelessEnabled ? '1' : '0';
   key += "\nscan:";
@@ -1345,11 +1151,7 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
   if (m_network != nullptr) {
     aps = sortedAccessPoints(m_network->accessPoints());
   }
-  static const std::vector<VpnConnectionInfo> kNoVpns;
-  static const std::vector<TailscaleExitNode> kNoExitNodes;
-  const auto& vpns = m_network != nullptr ? m_network->vpnConnections() : kNoVpns;
-  const auto& exitNodes = m_tailscale != nullptr ? m_tailscale->exitNodes() : kNoExitNodes;
-  const std::string nextStructure = structureKey(aps, vpns, exitNodes);
+  const std::string nextStructure = structureKey(aps);
   if (listWidth == m_lastListWidth && nextStructure == m_lastStructureKey) {
     return;
   }
@@ -1453,93 +1255,18 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
     m_list->removeChild(m_list->children().front().get());
   }
 
-  {
+  if (!networkAvailable()) {
+    m_list->addChild(
+        ui::label({
+            .text = i18n::tr("control-center.network.unavailable-title"),
+            .fontSize = Style::fontSizeBody * scale,
+            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        })
+    );
+  } else {
     const float opacity = panelCardOpacity();
 
-    // Tailscale is independent of the Wi-Fi backend, so the card is built even
-    // when no network service is available.
-    if (!vpns.empty() || !exitNodes.empty()) {
-      auto vpnCard = ui::column({
-          .configure = [scale, opacity](Flex& card) { applySectionCardStyle(card, scale, opacity); },
-      });
-
-      auto vpnHeader = makeCardHeaderRow(i18n::tr("control-center.network.vpns"), scale);
-      vpnHeader->addChild(
-          ui::toggle({
-              .checkedImmediate = m_vpnVisible,
-              .toggleSize = ToggleSize::Medium,
-              .scale = scale,
-              .onChange = [this, vpns](bool checked) {
-                if (!checked && m_network != nullptr) {
-                  for (const auto& vpn : vpns) {
-                    if (vpn.active) {
-                      m_network->deactivateVpnConnection(vpn);
-                    }
-                  }
-                }
-                m_vpnVisible = checked;
-                PanelManager::instance().refresh();
-              },
-          })
-      );
-      vpnCard->addChild(std::move(vpnHeader));
-
-      if (m_vpnVisible) {
-        std::vector<VpnRowSpec> rows;
-        rows.reserve(vpns.size() + exitNodes.size());
-        for (const auto& vpn : vpns) {
-          rows.push_back({
-              .name = vpn.name,
-              .active = vpn.active,
-              .onActivate =
-                  [this, vpn]() {
-                    if (m_network != nullptr) {
-                      m_network->activateVpnConnection(vpn);
-                    }
-                    PanelManager::instance().refresh();
-                  },
-              .onDeactivate =
-                  [this, vpn]() {
-                    if (m_network != nullptr) {
-                      m_network->deactivateVpnConnection(vpn);
-                    }
-                    PanelManager::instance().refresh();
-                  },
-          });
-        }
-        for (const auto& node : exitNodes) {
-          rows.push_back({
-              .name = node.name,
-              .iconAsset = node.online ? "tailscale.svg" : "tailscale-off.svg",
-              .active = node.active,
-              .enabled = !m_tailscale->busy(),
-              .onActivate =
-                  [this, node]() {
-                    if (m_tailscale != nullptr) {
-                      m_tailscale->connectExitNode(node);
-                    }
-                    PanelManager::instance().refresh();
-                  },
-              .onDeactivate =
-                  [this]() {
-                    if (m_tailscale != nullptr) {
-                      m_tailscale->disconnectExitNode();
-                    }
-                    PanelManager::instance().refresh();
-                  },
-          });
-        }
-
-        std::ranges::stable_partition(rows, [](const VpnRowSpec& row) { return row.active; });
-        for (auto& row : rows) {
-          vpnCard->addChild(std::make_unique<VpnConnectionRow>(renderer, scale, std::move(row)));
-        }
-      }
-
-      m_list->addChild(std::move(vpnCard));
-    }
-
-    if (networkAvailable() && m_modem != nullptr && !m_modem->modems().empty()) {
+    if (m_modem != nullptr && !m_modem->modems().empty()) {
       auto cellularCard = ui::column({
           .configure = [scale, opacity](Flex& card) { applySectionCardStyle(card, scale, opacity); },
       });
@@ -1565,15 +1292,7 @@ void NetworkTab::rebuildApList(Renderer& renderer) {
       m_list->addChild(std::move(cellularCard));
     }
 
-    if (!networkAvailable()) {
-      m_list->addChild(
-          ui::label({
-              .text = i18n::tr("control-center.network.unavailable-title"),
-              .fontSize = Style::fontSizeBody * scale,
-              .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-          })
-      );
-    } else {
+    {
       auto wifiCard = ui::column({
           .configure = [scale, opacity](Flex& card) { applySectionCardStyle(card, scale, opacity); },
       });
