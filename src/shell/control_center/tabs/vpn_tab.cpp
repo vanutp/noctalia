@@ -2,6 +2,7 @@
 
 #include "core/ui_phase.h"
 #include "dbus/network/inetwork_service.h"
+#include "i18n/i18n.h"
 #include "render/core/renderer.h"
 #include "shell/control_center/tabs/network_row.h"
 #include "shell/panel/panel_manager.h"
@@ -103,6 +104,10 @@ std::string VpnTab::structureKey(
   }
   key += "ts-busy:";
   key += (m_tailscale != nullptr && m_tailscale->busy()) ? '1' : '0';
+  key += "\nts-up:";
+  key += (m_tailscale != nullptr && m_tailscale->running()) ? '1' : '0';
+  key += "\nts-ip:";
+  key += m_tailscale != nullptr ? m_tailscale->selfIp() : std::string{};
   return key;
 }
 
@@ -184,15 +189,66 @@ void VpnTab::rebuildList(Renderer& renderer) {
 
   std::ranges::stable_partition(rows, [](const ConnectionRowSpec& row) { return row.active; });
 
-  // One untitled card holds every row: the tab header already names the section,
-  // and a card per kind would only draw a line between two halves of one list.
-  auto card = ui::column({
-      .configure = [scale, opacity](Flex& node) { applySectionCardStyle(node, scale, opacity); },
-  });
-  for (auto& row : rows) {
-    card->addChild(std::make_unique<ConnectionRow>(renderer, scale, std::move(row)));
+  if (m_tailscale != nullptr && m_tailscale->available()) {
+    auto tailscaleCard = ui::column({
+        .configure = [scale, opacity](Flex& node) { applySectionCardStyle(node, scale, opacity); },
+    });
+    // The tailnet address is a property of the running backend, so it only shows
+    // under the title while tailscale is up.
+    const std::string selfIp = m_tailscale->running() ? m_tailscale->selfIp() : std::string{};
+    auto titleColumn = ui::column(
+        {.align = FlexAlign::Start, .flexGrow = 1.0F},
+        ui::label({
+            .text = i18n::tr("control-center.vpn.tailscale"),
+            .fontSize = Style::fontSizeBody * scale,
+            .fontWeight = FontWeight::Bold,
+            .color = colorSpecFromRole(ColorRole::OnSurface),
+        })
+    );
+    if (!selfIp.empty()) {
+      titleColumn->addChild(
+          ui::label({
+              .text = selfIp,
+              .fontSize = Style::fontSizeCaption * scale,
+              .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+          })
+      );
+    }
+
+    auto header = ui::row({
+        .align = FlexAlign::Center,
+        .gap = Style::spaceSm * scale,
+        .minHeight = Style::controlHeightSm * scale,
+    });
+    header->addChild(std::move(titleColumn));
+    header->addChild(
+        ui::toggle({
+            .checkedImmediate = m_tailscale->running(),
+            .enabled = !m_tailscale->busy(),
+            .toggleSize = ToggleSize::Medium,
+            .scale = scale,
+            .onChange = [this](bool checked) {
+              if (m_tailscale != nullptr) {
+                m_tailscale->setEnabled(checked);
+              }
+              PanelManager::instance().refresh();
+            },
+        })
+    );
+    tailscaleCard->addChild(std::move(header));
+    m_list->addChild(std::move(tailscaleCard));
   }
-  m_list->addChild(std::move(card));
+
+  if (!rows.empty()) {
+    auto card = ui::column({
+        .configure = [scale, opacity](Flex& node) { applySectionCardStyle(node, scale, opacity); },
+    });
+    card->addChild(makeCardHeaderRow(i18n::tr("control-center.vpn.connections"), scale));
+    for (auto& row : rows) {
+      card->addChild(std::make_unique<ConnectionRow>(renderer, scale, std::move(row)));
+    }
+    m_list->addChild(std::move(card));
+  }
 
   m_list->layout(renderer);
 }
