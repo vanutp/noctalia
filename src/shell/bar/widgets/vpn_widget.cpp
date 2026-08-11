@@ -39,7 +39,7 @@ bool VpnWidget::vpnActive() const {
 
 bool VpnWidget::hasAnyTunnel() const {
   return (m_network != nullptr && !m_network->vpnConnections().empty())
-      || (m_tailscale != nullptr && !m_tailscale->exitNodes().empty());
+      || (m_tailscale != nullptr && m_tailscale->available());
 }
 
 void VpnWidget::create() {

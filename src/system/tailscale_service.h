@@ -40,6 +40,10 @@ public:
   void start();
 
   [[nodiscard]] bool available() const noexcept { return !m_binary.empty(); }
+  // The backend is up, i.e. `tailscale status` reports a running state.
+  [[nodiscard]] bool running() const noexcept { return m_running; }
+  // This machine's own address on the tailnet, empty while it has none.
+  [[nodiscard]] const std::string& selfIp() const noexcept { return m_selfIp; }
   [[nodiscard]] const std::vector<TailscaleExitNode>& exitNodes() const noexcept { return m_exitNodes; }
   [[nodiscard]] bool exitNodeActive() const noexcept;
   [[nodiscard]] std::string activeExitNodeName() const;
@@ -47,20 +51,25 @@ public:
   [[nodiscard]] bool busy() const noexcept { return m_busy; }
 
   void refresh();
+  void setEnabled(bool enabled);
   void connectExitNode(const TailscaleExitNode& node);
   void disconnectExitNode();
 
 private:
   void runStatus();
   void applyStatus(const std::string& json);
-  void runSet(const std::string& exitNode);
-  void runSetEscalated(const std::string& exitNode);
-  void notifyFailure();
+  // Runs `tailscale <args>`, retrying under polkit when tailscaled refuses the
+  // unprivileged call. failureMessage names the notification shown on failure.
+  void runCommand(std::vector<std::string> args, std::string failureMessage);
+  void runCommandEscalated(std::vector<std::string> args, std::string failureMessage);
+  void notifyFailure(const std::string& message);
   void emitChanged();
 
   std::string m_binary;
   std::string m_escalator;
   std::vector<TailscaleExitNode> m_exitNodes;
+  std::string m_selfIp;
+  bool m_running = false;
   bool m_busy = false;
   bool m_statusPending = false;
   ChangeCallback m_changeCallback;

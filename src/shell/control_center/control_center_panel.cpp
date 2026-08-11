@@ -483,7 +483,7 @@ bool ControlCenterPanel::deferPointerRelayout() const { return deferExternalRefr
 
 bool ControlCenterPanel::hasVpnConnections() const {
   return (m_network != nullptr && !m_network->vpnConnections().empty())
-      || (m_tailscale != nullptr && !m_tailscale->exitNodes().empty());
+      || (m_tailscale != nullptr && m_tailscale->available());
 }
 
 bool ControlCenterPanel::isTabFeatureAvailable(TabId tab) const {

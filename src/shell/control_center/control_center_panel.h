@@ -165,7 +165,7 @@ private:
   [[nodiscard]] int visibleTabOrdinal(TabId tab) const;
   void syncTabVisibility();
   [[nodiscard]] bool isTabFeatureAvailable(TabId tab) const;
-  // The VPN tab is worth a sidebar slot only once something can be connected.
+  // The VPN tab is worth a sidebar slot only with a VPN profile or tailscale to control.
   [[nodiscard]] bool hasVpnConnections() const;
   [[nodiscard]] bool isTabVisible(TabId tab) const;
   [[nodiscard]] bool isTabShown(TabId tab) const;
