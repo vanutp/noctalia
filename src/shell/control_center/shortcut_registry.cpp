@@ -95,7 +95,7 @@ namespace {
     std::string_view iconOn() const override { return "shield-lock"; }
     std::string_view iconOff() const override { return "shield-off"; }
     bool active() const override {
-      return (m_network != nullptr && m_network->state().vpnActive)
+      return (m_network != nullptr && m_network->state().vpnConnected)
           || (m_tailscale != nullptr && m_tailscale->exitNodeActive());
     }
     void onClick() override { openTab("vpn"); }

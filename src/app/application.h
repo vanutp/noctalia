@@ -105,6 +105,8 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace sdbus {
@@ -245,6 +247,7 @@ private:
   void onUpowerStateChangedForHooks();
   void onNetworkStateChangedForEvents(const NetworkState& state, NetworkChangeOrigin origin);
   void onBluetoothStateChangedForEvents(const BluetoothState& state, BluetoothStateChangeOrigin origin);
+  void onVpnConnectionsChangedForEvents();
   void onPowerProfileChangedForEvents(const PowerProfilesState& state, PowerProfilesChangeOrigin origin);
   std::vector<PollSource*> currentPollSources();
   std::vector<PollSource*> buildPollSources();
@@ -325,6 +328,8 @@ private:
   std::string m_prevBatteryPeripheralPathForEvents;
   std::optional<bool> m_prevWirelessEnabledForEvents;
   std::optional<bool> m_prevBluetoothPoweredForEvents;
+  // profile path -> name, for the VPNs connected as of the last notification pass
+  std::optional<std::unordered_map<std::string, std::string>> m_prevVpnConnectedForEvents;
   std::optional<std::string> m_prevPowerProfileActiveForEvents;
   std::unique_ptr<BrightnessService> m_brightnessService;
   std::unique_ptr<KeyboardBacklightService> m_keyboardBacklightService;

@@ -89,6 +89,8 @@ std::string VpnTab::structureKey(
     key += vpn.name;
     key.push_back(':');
     key += vpn.active ? '1' : '0';
+    key.push_back(':');
+    key += vpn.connecting ? '1' : '0';
     key.push_back('\n');
   }
   key += "---\n";
@@ -148,6 +150,7 @@ void VpnTab::rebuildList(Renderer& renderer) {
         .name = vpn.name,
         .glyph = "shield-lock",
         .active = vpn.active,
+        .connecting = vpn.connecting,
         .onActivate =
             [this, vpn]() {
               if (m_network != nullptr) {
@@ -187,7 +190,7 @@ void VpnTab::rebuildList(Renderer& renderer) {
     });
   }
 
-  std::ranges::stable_partition(rows, [](const ConnectionRowSpec& row) { return row.active; });
+  std::ranges::stable_partition(rows, [](const ConnectionRowSpec& row) { return row.active || row.connecting; });
 
   if (m_tailscale != nullptr && m_tailscale->available()) {
     auto tailscaleCard = ui::column({
