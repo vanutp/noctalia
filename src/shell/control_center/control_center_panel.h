@@ -77,7 +77,6 @@ public:
     std::string_view key;
     std::string_view titleKey;
   };
-  static std::vector<TabCatalogEntry> hideableTabCatalog();
 
   // Tabs a launcher row can jump straight to right now (feature-available and not
   // hidden via [control_center] hidden_tabs), excluding Home.
@@ -86,26 +85,6 @@ public:
     std::string_view titleKey;
     std::string_view glyph;
   };
-  std::vector<LauncherTabEntry> visibleTabsForLauncher() const;
-
-  void create() override;
-  void onFrameTick(float deltaMs, Renderer& renderer) override;
-  void onOpen(std::string_view context) override;
-  void onClose() override;
-  bool dismissTransientUi() override;
-  bool isContextActive(std::string_view context) const override;
-  bool handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
-  bool deferExternalRefresh() const override;
-  bool deferPointerRelayout() const override;
-  float preferredWidth() const override;
-  float preferredHeight() const override { return scaled(520.0F); }
-  PanelPlacement panelPlacement() const noexcept override;
-  bool showsSidebar() const noexcept { return m_showSidebar; }
-
-private:
-  void onPanelCardOpacityChanged(float opacity) override;
-  void doLayout(Renderer& renderer, float width, float height) override;
-  void doUpdate(Renderer& renderer) override;
 
   enum class TabId : std::uint8_t {
     Home,
@@ -130,6 +109,27 @@ private:
     const char* titleKey;
     const char* glyph;
   };
+  static std::vector<TabCatalogEntry> hideableTabCatalog();
+  std::vector<LauncherTabEntry> visibleTabsForLauncher() const;
+
+  void create() override;
+  void onFrameTick(float deltaMs, Renderer& renderer) override;
+  void onOpen(std::string_view context) override;
+  void onClose() override;
+  bool dismissTransientUi() override;
+  bool isContextActive(std::string_view context) const override;
+  bool handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
+  bool deferExternalRefresh() const override;
+  bool deferPointerRelayout() const override;
+  float preferredWidth() const override;
+  float preferredHeight() const override { return scaled(520.0F); }
+  PanelPlacement panelPlacement() const noexcept override;
+  bool showsSidebar() const noexcept { return m_showSidebar; }
+
+private:
+  void onPanelCardOpacityChanged(float opacity) override;
+  void doLayout(Renderer& renderer, float width, float height) override;
+  void doUpdate(Renderer& renderer) override;
 
   static constexpr std::size_t kTabCount = static_cast<std::size_t>(TabId::Count);
   static constexpr std::array<TabMeta, kTabCount> kTabs{{
@@ -166,7 +166,7 @@ private:
   int visibleTabOrdinal(TabId tab) const;
   void syncTabVisibility();
   bool isTabFeatureAvailable(TabId tab) const;
-  // The VPN tab is worth a sidebar slot only once something can be connected.
+  // The VPN tab is worth a sidebar slot only with a VPN profile or tailscale to control.
   bool hasVpnConnections() const;
   bool isTabVisible(TabId tab) const;
   bool isTabShown(TabId tab) const;
