@@ -8,6 +8,8 @@ namespace network_display {
 
   const char* glyphForState(const NetworkState& state) noexcept;
   const char* vpnGlyph() noexcept;
+  // Half shield: a tunnel is activating but not carrying traffic yet.
+  [[nodiscard]] const char* vpnConnectingGlyph() noexcept;
   const char* wifiGlyphForState(const NetworkState& state) noexcept;
   const char* wifiGlyphForSignal(std::uint8_t signal) noexcept;
   // Signal band 0 (weakest) .. 4 (strongest) — the bands the wifi glyph draws.

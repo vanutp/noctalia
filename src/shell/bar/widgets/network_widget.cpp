@@ -95,9 +95,13 @@ std::string NetworkWidget::activeExitNodeName() const {
 
 // A tailscale exit node routes everything through a remote peer, so it counts as
 // an active VPN for the indicator just like a NetworkManager tunnel does.
-bool NetworkWidget::vpnActive(const NetworkState& s) const {
-  return s.vpnActive || (m_tailscale != nullptr && m_tailscale->exitNodeActive());
+bool NetworkWidget::vpnConnected(const NetworkState& s) const {
+  return s.vpnConnected || (m_tailscale != nullptr && m_tailscale->exitNodeActive());
 }
+
+// A NetworkManager tunnel that is activating: it gets the half shield, not the
+// connected one.
+bool NetworkWidget::vpnConnecting(const NetworkState& s) { return s.vpnActive && !s.vpnConnected; }
 
 void NetworkWidget::create() {
   auto area = ui::inputArea({});
@@ -292,7 +296,10 @@ void NetworkWidget::syncState(Renderer& renderer) {
   m_lastCellularEnabled = cellularEnabled;
   m_lastCellularSignal = cellularSignal;
   m_lastCellularOperator = cellularOperator;
-  const bool vpnOn = vpnActive(s);
+  const bool vpnUp = vpnConnected(s);
+  const bool vpnPending = vpnConnecting(s);
+  const bool vpnOn = vpnUp || vpnPending;
+  const char* vpnStateGlyph = vpnUp ? network_display::vpnGlyph() : network_display::vpnConnectingGlyph();
 
   const bool cellularPrimary = s.kind == NetworkConnectivity::Cellular;
   const bool showSpinner = s.kind == NetworkConnectivity::Wired && s.resolving;
@@ -302,7 +309,7 @@ void NetworkWidget::syncState(Renderer& renderer) {
     const bool showVpn = m_vpnStatusMode == VpnStatusMode::Both && vpnOn;
     m_vpnGlyph->setVisible(showVpn);
     if (showVpn) {
-      m_vpnGlyph->setGlyph(network_display::vpnGlyph());
+      m_vpnGlyph->setGlyph(vpnStateGlyph);
       m_vpnGlyph->setGlyphSize(Style::baseGlyphSize * m_contentScale);
       m_vpnGlyph->setColor(widgetIconColorOr(colorSpecFromRole(ColorRole::OnSurface)));
       m_vpnGlyph->measure(renderer);
@@ -313,7 +320,7 @@ void NetworkWidget::syncState(Renderer& renderer) {
   // cellular connection shows live ModemManager signal bars.
   m_glyph->setVisible(!showSpinner);
   if (m_vpnStatusMode == VpnStatusMode::Replace && vpnOn) {
-    m_glyph->setGlyph(network_display::vpnGlyph());
+    m_glyph->setGlyph(vpnStateGlyph);
   } else if (cellularPrimary && modem != nullptr) {
     m_glyph->setGlyph(
         modem->enabled() ? network_display::cellularGlyphForSignal(modem->signalQuality)
@@ -456,7 +463,7 @@ std::vector<TooltipRow> NetworkWidget::buildTooltipRows() const {
       );
     }
 
-    if (vpnActive(s)) {
+    if (vpnConnected(s) || vpnConnecting(s)) {
       std::string vpnLabel;
       const auto append = [&vpnLabel](const std::string& name) {
         if (name.empty()) {
@@ -473,8 +480,10 @@ std::vector<TooltipRow> NetworkWidget::buildTooltipRows() const {
         }
       }
       append(activeExitNodeName());
+      // Nothing named means the only tunnel is still coming up.
       rows.push_back(
-          {i18n::tr("bar.widgets.network.vpn"), vpnLabel.empty() ? i18n::tr("bar.widgets.network.active") : vpnLabel}
+          {i18n::tr("bar.widgets.network.vpn"),
+           vpnLabel.empty() ? i18n::tr("bar.widgets.network.connecting") : vpnLabel}
       );
     }
 
@@ -498,8 +507,10 @@ std::vector<TooltipRow> NetworkWidget::buildTooltipRows() const {
   if (secondaryModem != nullptr) {
     appendCellularRows(*secondaryModem);
   }
-  if (vpnActive(s)) {
+  if (vpnConnected(s)) {
     rows.push_back({i18n::tr("bar.widgets.network.vpn"), i18n::tr("bar.widgets.network.active")});
+  } else if (vpnConnecting(s)) {
+    rows.push_back({i18n::tr("bar.widgets.network.vpn"), i18n::tr("bar.widgets.network.connecting")});
   }
   return rows;
 }

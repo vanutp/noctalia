@@ -29,7 +29,8 @@ private:
   void doUpdate(Renderer& renderer) override;
   void syncState(Renderer& renderer);
   [[nodiscard]] std::string activeTunnelName() const;
-  [[nodiscard]] bool vpnActive() const;
+  [[nodiscard]] bool vpnConnected() const;
+  [[nodiscard]] bool vpnConnecting() const;
   [[nodiscard]] bool hasAnyTunnel() const;
 
   INetworkService* m_network = nullptr;
@@ -39,7 +40,8 @@ private:
   Glyph* m_glyph = nullptr;
   Label* m_label = nullptr;
   std::string m_lastName;
-  bool m_lastActive = false;
+  bool m_lastConnected = false;
+  bool m_lastConnecting = false;
   bool m_lastHasTunnel = false;
   bool m_haveLastState = false;
 };

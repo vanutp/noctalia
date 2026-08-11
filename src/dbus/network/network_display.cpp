@@ -16,6 +16,8 @@ namespace network_display {
 
   const char* vpnGlyph() noexcept { return "shield-check"; }
 
+  const char* vpnConnectingGlyph() noexcept { return "shield-half"; }
+
   const char* wifiGlyphForState(const NetworkState& state) noexcept {
     if (!state.wirelessEnabled) {
       return "wifi-off";

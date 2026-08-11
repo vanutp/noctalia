@@ -2663,8 +2663,10 @@ void NetworkManagerService::refreshVpnAndActiveConnections(const std::function<v
               return;
             }
             std::ranges::sort(vpnState->vpns, [](const VpnConnectionInfo& a, const VpnConnectionInfo& b) {
-              if (a.active != b.active) {
-                return a.active;
+              const bool aUp = a.active || a.connecting;
+              const bool bUp = b.active || b.connecting;
+              if (aUp != bUp) {
+                return aUp;
               }
               return a.name < b.name;
             });
@@ -2726,10 +2728,9 @@ void NetworkManagerService::refreshVpnAndActiveConnections(const std::function<v
                     if (--activeState->pending == 0) {
                       bool anyConnected = false;
                       for (auto& vpn : vpnState->vpns) {
-                        if (activeState->activeProfilePaths.contains(vpn.path)) {
-                          vpn.active = true;
-                        }
-                        if (activeState->activatedProfilePaths.contains(vpn.path)) {
+                        vpn.active = activeState->activatedProfilePaths.contains(vpn.path);
+                        vpn.connecting = !vpn.active && activeState->activeProfilePaths.contains(vpn.path);
+                        if (vpn.active) {
                           anyConnected = true;
                         }
                       }
@@ -3668,7 +3669,7 @@ void NetworkManagerService::readStateAsync(const std::function<void(NetworkState
 
   bool vpnFromList = false;
   for (const auto& vpn : m_vpnConnections) {
-    if (vpn.active) {
+    if (vpn.active || vpn.connecting) {
       vpnFromList = true;
       break;
     }

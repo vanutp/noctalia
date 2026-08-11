@@ -17,7 +17,7 @@ namespace {
 
 } // namespace
 
-NetworkRowBase::NetworkRowBase(float scale, bool primary) : m_primary(primary) {
+NetworkRowBase::NetworkRowBase(float scale, bool inert) : m_inert(inert) {
   setDirection(FlexDirection::Horizontal);
   setAlign(FlexAlign::Center);
   setGap(Style::spaceSm * scale);
@@ -102,7 +102,7 @@ void NetworkRowBase::finishRow(Button* actionButton) {
   m_actionButton = actionButton;
   auto area = ui::inputArea({});
   area->setPropagateEvents(true);
-  if (!m_primary) {
+  if (!m_inert) {
     area->setOnEnter([this](const InputArea::PointerData& /*data*/) { applyState(); });
     area->setOnLeave([this]() { applyState(); });
     area->setOnPress([this](const InputArea::PointerData& /*data*/) { applyState(); });
@@ -114,8 +114,8 @@ void NetworkRowBase::finishRow(Button* actionButton) {
 }
 
 void NetworkRowBase::applyState() {
-  const bool hov = !m_primary && m_inputArea != nullptr && m_inputArea->hovered();
-  const bool pressed = !m_primary && m_inputArea != nullptr && m_inputArea->pressed();
+  const bool hov = !m_inert && m_inputArea != nullptr && m_inputArea->hovered();
+  const bool pressed = !m_inert && m_inputArea != nullptr && m_inputArea->pressed();
   if (pressed) {
     setFill(colorSpecFromRole(ColorRole::Primary));
     setBorder(colorSpecFromRole(ColorRole::Primary), Style::borderWidth);
@@ -142,9 +142,9 @@ void NetworkRowBase::applyState() {
 }
 
 ConnectionRow::ConnectionRow(Renderer& renderer, float scale, ConnectionRowSpec spec)
-    : NetworkRowBase(scale, spec.primary), m_active(spec.active), m_enabled(spec.enabled),
-      m_onActivate(std::move(spec.onActivate)), m_onDeactivate(std::move(spec.onDeactivate)),
-      m_onMakePrimary(std::move(spec.onMakePrimary)) {
+    : NetworkRowBase(scale, spec.primary || spec.connecting || !spec.enabled), m_active(spec.active),
+      m_enabled(spec.enabled && !spec.connecting), m_onActivate(std::move(spec.onActivate)),
+      m_onDeactivate(std::move(spec.onDeactivate)), m_onMakePrimary(std::move(spec.onMakePrimary)) {
   if (!spec.iconAsset.empty()) {
     const float iconSize = Style::baseGlyphSize * scale;
     auto icon = ui::image({.width = iconSize, .height = iconSize});
@@ -168,6 +168,20 @@ ConnectionRow::ConnectionRow(Renderer& renderer, float scale, ConnectionRowSpec 
 
   if (spec.showPrimaryBadge) {
     addPrimaryBadge(scale);
+  }
+
+  // A row mid-activation shows a spinner in place of the trailing button and
+  // takes no clicks until the backend settles.
+  if (spec.connecting) {
+    addChild(
+        ui::spinner({
+            .color = colorSpecFromRole(ColorRole::Primary),
+            .spinnerSize = Style::baseGlyphSize * scale,
+            .spinning = true,
+        })
+    );
+    finishRow(nullptr);
+    return;
   }
 
   // Only the active row carries a button, to disconnect, and the slot collapses
