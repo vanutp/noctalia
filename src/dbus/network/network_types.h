@@ -32,7 +32,8 @@ struct AccessPointInfo {
 struct VpnConnectionInfo {
   std::string path; // Backend settings connection object path.
   std::string name;
-  bool active = false;
+  bool active = false;     // tunnel fully activated
+  bool connecting = false; // activation in progress, not yet up
 
   bool operator==(const VpnConnectionInfo&) const = default;
 };

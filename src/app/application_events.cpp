@@ -142,7 +142,50 @@ void Application::onUpowerStateChangedForHooks() {
   }
 }
 
+void Application::onVpnConnectionsChangedForEvents() {
+  if (m_networkService == nullptr) {
+    return;
+  }
+  std::unordered_map<std::string, std::string> connected;
+  for (const auto& vpn : m_networkService->vpnConnections()) {
+    if (vpn.active) {
+      connected.emplace(vpn.path, vpn.name);
+    }
+  }
+
+  // The first callback is the initial enumeration: seed silently so tunnels
+  // already up at startup do not notify.
+  if (!m_prevVpnConnectedForEvents.has_value()) {
+    m_prevVpnConnectedForEvents = std::move(connected);
+    return;
+  }
+  const auto& prev = *m_prevVpnConnectedForEvents;
+
+  auto notify = [this](const std::string& name, bool isConnect) {
+    m_notificationManager.addInternal(
+        i18n::tr("notifications.internal.vpn"),
+        i18n::tr(isConnect ? "notifications.internal.vpn-connected" : "notifications.internal.vpn-disconnected"), name,
+        Urgency::Low, kDefaultNotificationTimeout,
+        std::string("noctalia-glyph:") + (isConnect ? "shield-lock" : "shield-off")
+    );
+  };
+
+  for (const auto& [path, name] : connected) {
+    if (!prev.contains(path)) {
+      notify(name, true);
+    }
+  }
+  for (const auto& [path, name] : prev) {
+    if (!connected.contains(path)) {
+      notify(name, false);
+    }
+  }
+
+  m_prevVpnConnectedForEvents = std::move(connected);
+}
+
 void Application::onNetworkStateChangedForEvents(const NetworkState& state, NetworkChangeOrigin origin) {
+  onVpnConnectionsChangedForEvents();
   if (!m_prevWirelessEnabledForEvents.has_value()) {
     m_prevWirelessEnabledForEvents = state.wirelessEnabled;
     return;

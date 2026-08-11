@@ -26,26 +26,27 @@ public:
   void doArrange(Renderer& renderer, const LayoutRect& rect) override;
 
 protected:
-  NetworkRowBase(float scale, bool primary);
+  // An inert row takes no hover, press, or click handlers at all.
+  NetworkRowBase(float scale, bool inert);
 
   // The connected row carries its addresses underneath the name; every other row
   // is a single line and the detail label stays out of the layout.
   void addTitleColumn(float scale, const std::string& name, bool active);
   void addPrimaryBadge(float scale);
 
-  // Call once every child is in place. A row that already holds the default
-  // route is left inert: no handlers are attached at all, and InputArea only
+  // Call once every child is in place. An inert row (it already holds the default
+  // route, or it is mid-transition) gets no handlers at all, and InputArea only
   // claims the pointer cursor once an onClick is, so withholding them is what
   // keeps the cursor normal.
   void finishRow(Button* actionButton);
 
-  // Only reached on a row that is not already primary; see finishRow().
+  // Only reached on a row that is not inert; see finishRow().
   virtual void onRowClicked() = 0;
 
 private:
   void applyState();
 
-  bool m_primary = false;
+  bool m_inert = false;
   Label* m_title = nullptr;
   Label* m_detail = nullptr;
   Button* m_actionButton = nullptr;
@@ -61,6 +62,7 @@ struct ConnectionRowSpec {
   std::string iconAsset; // svg under assets/, empty for no leading icon
   std::string glyph;     // font glyph, used when no iconAsset is given
   bool active = false;
+  bool connecting = false; // shows a spinner instead of the disconnect button
   bool enabled = true;
   std::function<void()> onActivate;
   std::function<void()> onDeactivate;

@@ -233,6 +233,7 @@ private:
   void onNetworkStateChangedForEvents(const NetworkState& state, NetworkChangeOrigin origin);
   void onBluetoothStateChangedForEvents(const BluetoothState& state, BluetoothStateChangeOrigin origin);
   void onBluetoothDevicesChangedForEvents(const std::vector<BluetoothDeviceInfo>& devices);
+  void onVpnConnectionsChangedForEvents();
   void onPowerProfileChangedForEvents(const PowerProfilesState& state, PowerProfilesChangeOrigin origin);
   [[nodiscard]] std::vector<PollSource*> currentPollSources();
   [[nodiscard]] std::vector<PollSource*> buildPollSources();
@@ -310,6 +311,8 @@ private:
   std::optional<bool> m_prevBluetoothPoweredForEvents;
   // device path -> alias, for the devices connected as of the last notification pass
   std::optional<std::unordered_map<std::string, std::string>> m_prevBluetoothConnectedForEvents;
+  // profile path -> name, for the VPNs connected as of the last notification pass
+  std::optional<std::unordered_map<std::string, std::string>> m_prevVpnConnectedForEvents;
   std::optional<std::string> m_prevPowerProfileActiveForEvents;
   std::unique_ptr<BrightnessService> m_brightnessService;
   std::unique_ptr<KeyboardBacklightService> m_keyboardBacklightService;

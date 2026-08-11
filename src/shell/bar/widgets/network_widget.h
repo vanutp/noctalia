@@ -44,7 +44,8 @@ private:
   [[nodiscard]] std::vector<TooltipRow> buildTooltipRows() const;
   [[nodiscard]] std::string activeVpnName() const;
   [[nodiscard]] std::string activeExitNodeName() const;
-  [[nodiscard]] bool vpnActive(const NetworkState& s) const;
+  [[nodiscard]] bool vpnConnected(const NetworkState& s) const;
+  [[nodiscard]] static bool vpnConnecting(const NetworkState& s);
 
   INetworkService* m_network = nullptr;
   ExternalIpService* m_externalIp = nullptr;

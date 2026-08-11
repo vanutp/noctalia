@@ -1,6 +1,7 @@
 #include "shell/bar/widgets/vpn_widget.h"
 
 #include "dbus/network/inetwork_service.h"
+#include "dbus/network/network_display.h"
 #include "i18n/i18n.h"
 #include "render/scene/input_area.h"
 #include "render/scene/node.h"
@@ -32,9 +33,15 @@ std::string VpnWidget::activeTunnelName() const {
   return m_tailscale != nullptr ? m_tailscale->activeExitNodeName() : std::string{};
 }
 
-bool VpnWidget::vpnActive() const {
-  return (m_network != nullptr && m_network->state().vpnActive)
+bool VpnWidget::vpnConnected() const {
+  return (m_network != nullptr && m_network->state().vpnConnected)
       || (m_tailscale != nullptr && m_tailscale->exitNodeActive());
+}
+
+// A NetworkManager tunnel that is activating: the indicator stays off until the
+// tunnel actually carries traffic.
+bool VpnWidget::vpnConnecting() const {
+  return m_network != nullptr && m_network->state().vpnActive && !m_network->state().vpnConnected;
 }
 
 bool VpnWidget::hasAnyTunnel() const {
@@ -99,20 +106,26 @@ void VpnWidget::syncState(Renderer& renderer) {
     return;
   }
 
-  const bool active = vpnActive();
+  const bool connected = vpnConnected();
+  const bool connecting = vpnConnecting();
   const bool hasTunnel = hasAnyTunnel();
   const std::string name = activeTunnelName();
-  if (m_haveLastState && active == m_lastActive && hasTunnel == m_lastHasTunnel && name == m_lastName) {
+  if (m_haveLastState
+      && connected == m_lastConnected
+      && connecting == m_lastConnecting
+      && hasTunnel == m_lastHasTunnel
+      && name == m_lastName) {
     return;
   }
-  m_lastActive = active;
+  m_lastConnected = connected;
+  m_lastConnecting = connecting;
   m_lastHasTunnel = hasTunnel;
   m_lastName = name;
   m_haveLastState = true;
 
   // Nothing to connect to means nothing to say: the widget collapses rather than
   // sitting in the bar as a permanently dead icon.
-  const bool showWidget = hasTunnel && (!m_hideWhenDisconnected || active);
+  const bool showWidget = hasTunnel && (!m_hideWhenDisconnected || connected || connecting);
   if (rootNode->visible() != showWidget || rootNode->participatesInLayout() != showWidget) {
     rootNode->setVisible(showWidget);
     rootNode->setParticipatesInLayout(showWidget);
@@ -123,19 +136,29 @@ void VpnWidget::syncState(Renderer& renderer) {
     return;
   }
 
-  m_glyph->setGlyph(active ? "shield-check" : "shield-off");
+  if (connected) {
+    m_glyph->setGlyph(network_display::vpnGlyph());
+  } else {
+    m_glyph->setGlyph(connecting ? network_display::vpnConnectingGlyph() : "shield-off");
+  }
   m_glyph->setGlyphSize(Style::baseGlyphSize * m_contentScale);
   m_glyph->setColor(widgetIconColorOr(colorSpecFromRole(ColorRole::OnSurface)));
   m_glyph->measure(renderer);
 
   if (m_label != nullptr) {
-    m_label->setText(active ? name : std::string{});
+    m_label->setText(connected ? name : std::string{});
     m_label->setColor(widgetForegroundOr(colorSpecFromRole(ColorRole::OnSurface)));
     m_label->measure(renderer);
   }
 
+  std::string status = i18n::tr("bar.widgets.network.not-connected");
+  if (connected) {
+    status = name;
+  } else if (connecting) {
+    status = i18n::tr("bar.widgets.network.connecting");
+  }
   std::vector<TooltipRow> rows;
-  rows.push_back({i18n::tr("bar.widgets.network.vpn"), active ? name : i18n::tr("bar.widgets.network.not-connected")});
+  rows.push_back({i18n::tr("bar.widgets.network.vpn"), std::move(status)});
   static_cast<InputArea*>(rootNode)->setTooltip(std::move(rows));
 
   requestRedraw();

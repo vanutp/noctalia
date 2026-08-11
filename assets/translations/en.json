@@ -900,6 +900,9 @@
       "tailscale": "Tailscale",
       "tailscale-exit-node-failed": "Could not change the Tailscale exit node. Check that tailscaled is running and that the authentication was accepted.",
       "tailscale-toggle-failed": "Could not change the Tailscale connection state. Check that tailscaled is running and that the authentication was accepted.",
+      "vpn": "VPN",
+      "vpn-connected": "VPN connected",
+      "vpn-disconnected": "VPN disconnected",
       "wallpaper-palette-export": "Custom Palette",
       "wallpaper-palette-export-success": "Saved \"{name}\" and switched palette source to custom."
     }
