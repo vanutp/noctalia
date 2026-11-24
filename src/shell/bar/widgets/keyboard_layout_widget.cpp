@@ -140,6 +140,7 @@ void KeyboardLayoutWidget::doLayout(Renderer& renderer, float containerWidth, fl
 void KeyboardLayoutWidget::doUpdate(Renderer& renderer) { sync(renderer); }
 
 std::optional<FcitxInputMethodState> KeyboardLayoutWidget::inputMethodState() const {
+  return std::nullopt;
   if (m_tray == nullptr) {
     return std::nullopt;
   }
